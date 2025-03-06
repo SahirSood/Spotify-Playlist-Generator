@@ -22,7 +22,8 @@ app.get('/login',(req, res) => {
         'playlist-modify-public',
         'playlist-modify-private',
         'user-read-recently-played',
-        'user-top-read'
+        'user-top-read',
+        'user-library-read'
         ].join(' ');
 
     const params = querystring.stringify({

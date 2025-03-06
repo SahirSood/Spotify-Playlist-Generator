@@ -6,6 +6,8 @@ function Dashboard() {
     const [playlists, setPlaylists] = useState([]);
     const [likedSongs, setLikedSongs] = useState([]);
     const [showLikedSongs, setShowLikedSongs] = useState(false);  // Fix 1 - Added this
+    const [selectedPlaylistName, setSelectedPlaylistName] = useState('');
+    const [nextLikedSongsUrl, setNextLikedSongsUrl] = useState('');
 
     // Extract tokens from URL or LocalStorage
     useEffect(() => {
@@ -49,32 +51,55 @@ function Dashboard() {
 
     // Fetch all liked songs (with pagination)
     const fetchLikedSongs = async () => {
-        let allSongs = [];
-        let nextUrl = 'https://api.spotify.com/v1/me/tracks';
-
+        setSelectedPlaylistName('❤️ Your Liked Songs');
+        setShowLikedSongs(true);
+        setLikedSongs([]);   // Clear any old songs
+    
         try {
-            while (nextUrl) {
-                const response = await fetch(nextUrl, {
-                    headers: { Authorization: `Bearer ${accessToken}` }
-                });
-
-                const data = await response.json();  // Fix 2 - Added this
-                allSongs = [...allSongs, ...data.items];
-                nextUrl = data.next;  // Get URL for next page (null if none)
-            }
-
-            setLikedSongs(allSongs);
-            setShowLikedSongs(true);
+            const response = await fetch('https://api.spotify.com/v1/me/tracks', {
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+    
+            const data = await response.json();
+    
+            setLikedSongs(data.items);  // Show the first 50 songs
+            setNextLikedSongsUrl(data.next);  // Save the next page URL for later
         } catch (error) {
             console.error('Error fetching liked songs:', error);
         }
     };
+
+    const loadMoreLikedSongs = async () => {
+        if (!nextLikedSongsUrl) return;  // No more pages
+    
+        try {
+            const response = await fetch(nextLikedSongsUrl, {
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+    
+            const data = await response.json();
+    
+            setLikedSongs((prevSongs) => [...prevSongs, ...data.items]);  // Add new songs to list
+            setNextLikedSongsUrl(data.next);  // Update next page URL (or null if no more)
+        } catch (error) {
+            console.error('Error fetching more liked songs:', error);
+        }
+    };
+    
+    
+    
 
     const handlePlaylistClick = (playlist) => {
         if (playlist.id === 'liked-songs') {
             fetchLikedSongs();
         } else {
             console.log(`Playlist clicked: ${playlist.name}`);
+        }
+    };
+    const handleScroll = (event) => {
+        const { scrollTop, scrollHeight, clientHeight } = event.target;
+        if (scrollTop + clientHeight >= scrollHeight - 5) {
+            loadMoreLikedSongs();
         }
     };
 
@@ -107,14 +132,24 @@ function Dashboard() {
 
             {/* Sidebar (right side) - shows liked songs only when needed */}
             {showLikedSongs && (
-                <div style={{
-                    width: '300px',
-                    padding: '20px',
-                    borderLeft: '1px solid #ccc',
-                    backgroundColor: '#f9f9f9'
-                }}>
-                    <h2>❤️ Your Liked Songs</h2>
-                    <button onClick={() => setShowLikedSongs(false)}>Close</button>
+            <div style={{
+                width: '300px',
+                padding: '20px',
+                borderLeft: '1px solid #ccc',
+                backgroundColor: '#f9f9f9'
+            }}>
+                <h2>❤️ Your Liked Songs</h2>
+                <button onClick={() => setShowLikedSongs(false)}>Close</button>
+                
+                {/* Scrollable liked songs list */}
+                <div 
+                    style={{ 
+                        height: '400px', 
+                        overflowY: 'auto', 
+                        border: '1px solid #ddd' 
+                    }} 
+                    onScroll={handleScroll}
+                >
                     <ul style={{ listStyleType: 'none', padding: 0 }}>
                         {likedSongs.map((song) => (
                             <li key={song.track.id}>
@@ -123,7 +158,9 @@ function Dashboard() {
                         ))}
                     </ul>
                 </div>
-            )}
+            </div>
+        )}
+
         </div>
     );
 }
