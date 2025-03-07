@@ -5,9 +5,11 @@ function Dashboard() {
     const [refreshToken, setRefreshToken] = useState('');
     const [playlists, setPlaylists] = useState([]);
     const [likedSongs, setLikedSongs] = useState([]);
-    const [showLikedSongs, setShowLikedSongs] = useState(false);  // Fix 1 - Added this
+    const [showSidebar, setShowSidebar] = useState(false);  // Fix 1 - Added this
     const [selectedPlaylistName, setSelectedPlaylistName] = useState('');
     const [nextLikedSongsUrl, setNextLikedSongsUrl] = useState('');
+    const [nextPlaylistSongsUrl, setNextPlaylistSongsUrl] = useState('');
+
 
     // Extract tokens from URL or LocalStorage
     useEffect(() => {
@@ -49,10 +51,11 @@ function Dashboard() {
         fetchPlaylists();
     }, [accessToken]);
 
+
     // Fetch all liked songs (with pagination)
     const fetchLikedSongs = async () => {
         setSelectedPlaylistName('❤️ Your Liked Songs');
-        setShowLikedSongs(true);
+        setShowSidebar(true);
         setLikedSongs([]);   // Clear any old songs
     
         try {
@@ -86,20 +89,59 @@ function Dashboard() {
         }
     };
     
+
+    const fetchPlaylistSongs = async(playlist) => {
+        setSelectedPlaylistName(playlist.name); // Playlist has an id and a name
+        setShowSidebar(true); // this is what we use to show the sidebar, can change to a generic name that works for both palylists and likedsongs
+        setLikedSongs([]);  // Same as above, list of songs that will be showing, we are clearing it
+        setNextPlaylistSongsUrl('');  // Clear any old next URL
+        
+        const firstPageUrl = `https://api.spotify.com/v1/playlists/${playlist.id}/tracks`;
+
+        const response = await fetch(firstPageUrl, {
+            headers: { Authorization: `Bearer ${accessToken}` }
+        });
+
+        const data = await response.json();
+        setLikedSongs(data.items);
+        setNextPlaylistSongsUrl(data.next);
+    }
+
+    const loadMorePlaylistSongs = async () => {
+        if (!nextPlaylistSongsUrl) return;
     
+        try {
+            const response = await fetch(nextPlaylistSongsUrl, {
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
+    
+            const data = await response.json();
+    
+            setLikedSongs((prevSongs) => [...prevSongs, ...data.items]); // Append new songs
+            setNextPlaylistSongsUrl(data.next); // Update next page URL
+        } catch (error) {
+            console.error('Error fetching more songs for playlist:', error);
+        }
+    };
     
 
     const handlePlaylistClick = (playlist) => {
         if (playlist.id === 'liked-songs') {
             fetchLikedSongs();
         } else {
-            console.log(`Playlist clicked: ${playlist.name}`);
+            fetchPlaylistSongs(playlist);
         }
     };
     const handleScroll = (event) => {
         const { scrollTop, scrollHeight, clientHeight } = event.target;
+    
         if (scrollTop + clientHeight >= scrollHeight - 5) {
-            loadMoreLikedSongs();
+            // If viewing Liked Songs, load more liked songs
+            if (selectedPlaylistName === '❤️ Liked Songs') {
+                loadMoreLikedSongs();
+            } else {
+                loadMorePlaylistSongs();
+            }
         }
     };
 
@@ -131,15 +173,16 @@ function Dashboard() {
             </div>
 
             {/* Sidebar (right side) - shows liked songs only when needed */}
-            {showLikedSongs && (
+            {showSidebar && (
             <div style={{
                 width: '300px',
                 padding: '20px',
                 borderLeft: '1px solid #ccc',
                 backgroundColor: '#f9f9f9'
             }}>
-                <h2>❤️ Your Liked Songs</h2>
-                <button onClick={() => setShowLikedSongs(false)}>Close</button>
+                <h2>{selectedPlaylistName}</h2>
+
+                <button onClick={() => setShowSidebar(false)}>Close</button>
                 
                 {/* Scrollable liked songs list */}
                 <div 
