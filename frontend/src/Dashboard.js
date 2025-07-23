@@ -54,7 +54,7 @@ function Dashboard() {
 
     // Fetch all liked songs (with pagination)
     const fetchLikedSongs = async () => {
-        setSelectedPlaylistName('❤️ Your Liked Songs');
+        setSelectedPlaylistName('❤️ Liked Songs');
         setShowSidebar(true);
         setLikedSongs([]);   // Clear any old songs
     
@@ -63,12 +63,17 @@ function Dashboard() {
                 headers: { Authorization: `Bearer ${accessToken}` }
             });
     
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+    
             const data = await response.json();
     
             setLikedSongs(data.items);  // Show the first 50 songs
             setNextLikedSongsUrl(data.next);  // Save the next page URL for later
         } catch (error) {
             console.error('Error fetching liked songs:', error);
+            alert('Failed to fetch liked songs. Please try again.');
         }
     };
 
@@ -80,12 +85,17 @@ function Dashboard() {
                 headers: { Authorization: `Bearer ${accessToken}` }
             });
     
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+    
             const data = await response.json();
     
             setLikedSongs((prevSongs) => [...prevSongs, ...data.items]);  // Add new songs to list
             setNextLikedSongsUrl(data.next);  // Update next page URL (or null if no more)
         } catch (error) {
             console.error('Error fetching more liked songs:', error);
+            alert('Failed to load more liked songs. Please try again.');
         }
     };
     
@@ -96,15 +106,24 @@ function Dashboard() {
         setLikedSongs([]);  // Same as above, list of songs that will be showing, we are clearing it
         setNextPlaylistSongsUrl('');  // Clear any old next URL
         
-        const firstPageUrl = `https://api.spotify.com/v1/playlists/${playlist.id}/tracks`;
+        try {
+            const firstPageUrl = `https://api.spotify.com/v1/playlists/${playlist.id}/tracks`;
 
-        const response = await fetch(firstPageUrl, {
-            headers: { Authorization: `Bearer ${accessToken}` }
-        });
+            const response = await fetch(firstPageUrl, {
+                headers: { Authorization: `Bearer ${accessToken}` }
+            });
 
-        const data = await response.json();
-        setLikedSongs(data.items);
-        setNextPlaylistSongsUrl(data.next);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            setLikedSongs(data.items);
+            setNextPlaylistSongsUrl(data.next);
+        } catch (error) {
+            console.error('Error fetching playlist songs:', error);
+            alert('Failed to fetch playlist songs. Please try again.');
+        }
     }
 
     const loadMorePlaylistSongs = async () => {
