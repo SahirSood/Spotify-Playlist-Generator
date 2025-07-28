@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "choco": "^0.2.1",
+    "chocolatey": "^0.0.1"
+  }
+}

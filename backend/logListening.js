@@ -1,6 +1,12 @@
 const axios = require('axios');
-const { getFirestore } = require('firebase-admin/firestore');
-const db = getFirestore();
+const AWS = require('aws-sdk');
+
+// Fix 1: Correct DynamoDB configuration syntax
+const dynamoDB = new AWS.DynamoDB.DocumentClient({
+  region: process.env.AWS_REGION,
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+});
 
 async function logListening(userId, accessToken) {
   try {
@@ -31,13 +37,13 @@ async function logListening(userId, accessToken) {
       const weatherRes = await axios.get(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${process.env.OPENWEATHER_API_KEY}&units=metric`);
       const weather = weatherRes.data;
 
-      // 5. Format and store in Firestore
-      await db.collection('users')
-        .doc(userId)
-        .collection('listening_data')
-        .doc(timestamp)
-        .set({
-          trackId,
+      // 5. Format and store in DynamoDB
+      const itemToStore = {
+        TableName: 'ListeningData',
+        Item: {
+          userId: userId,
+          timestamp: timestamp,
+          trackId: trackId,
           trackName: track.name,
           artist: track.artists.map(a => a.name).join(', '),
           audioFeatures: {
@@ -53,15 +59,16 @@ async function logListening(userId, accessToken) {
           },
           timeOfDay: getTimeOfDay(new Date(timestamp)),
           source: 'recently-played'
-        });
+        }
+      };
 
-      console.log(`✅ Logged track: ${track.name}`);
+      await dynamoDB.put(itemToStore).promise();
+      console.log(`✅ Stored: ${track.name}`);
     }
-
   } catch (err) {
-    console.error('❌ Error logging listening history:', err.response?.data || err.message);
+    console.error('❌ Error logging listening data:', err.response?.data || err.message);
   }
-}
+} // Fix 2: Properly close the function
 
 function getTimeOfDay(date) {
   const hour = date.getHours();

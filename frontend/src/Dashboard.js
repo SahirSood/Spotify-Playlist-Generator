@@ -1,15 +1,114 @@
 import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 function Dashboard() {
+    const navigate = useNavigate();
     const [accessToken, setAccessToken] = useState('');
     const [refreshToken, setRefreshToken] = useState('');
     const [playlists, setPlaylists] = useState([]);
     const [likedSongs, setLikedSongs] = useState([]);
-    const [showSidebar, setShowSidebar] = useState(false);  // Fix 1 - Added this
+    const [showSidebar, setShowSidebar] = useState(false);
     const [selectedPlaylistName, setSelectedPlaylistName] = useState('');
     const [nextLikedSongsUrl, setNextLikedSongsUrl] = useState('');
     const [nextPlaylistSongsUrl, setNextPlaylistSongsUrl] = useState('');
+    // NEW: Add listening analytics state
+    const [listeningData, setListeningData] = useState(null);
+    const [showAnalytics, setShowAnalytics] = useState(false);
 
+    // Function to refresh access token
+    const refreshAccessToken = async () => {
+        if (!refreshToken) {
+            console.error('No refresh token available');
+            handleLogout();
+            return null;
+        }
+
+        try {
+            const response = await fetch('http://localhost:5000/refresh', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ refresh_token: refreshToken })
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to refresh token');
+            }
+
+            const data = await response.json();
+            const newAccessToken = data.access_token;
+
+            // Update tokens
+            setAccessToken(newAccessToken);
+            localStorage.setItem('spotify_access_token', newAccessToken);
+
+            console.log('✅ Token refreshed successfully');
+            return newAccessToken;
+
+        } catch (error) {
+            console.error('❌ Error refreshing token:', error);
+            handleLogout(); // Force re-login if refresh fails
+            return null;
+        }
+    };
+
+    // Enhanced fetch function with automatic token refresh
+    const spotifyFetch = async (url, options = {}) => {
+        let token = accessToken;
+
+        // First attempt with current token
+        let response = await fetch(url, {
+            ...options,
+            headers: {
+                Authorization: `Bearer ${token}`,
+                ...options.headers
+            }
+        });
+
+        // If token expired, refresh and retry
+        if (response.status === 401) {
+            console.log('🔄 Token expired, refreshing...');
+            token = await refreshAccessToken();
+            
+            if (!token) {
+                throw new Error('Unable to refresh token');
+            }
+
+            // Retry with new token
+            response = await fetch(url, {
+                ...options,
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    ...options.headers
+                }
+            });
+        }
+
+        return response;
+    };
+
+    // NEW: Function to fetch and analyze listening data
+    const fetchListeningAnalytics = async () => {
+        try {
+            setShowAnalytics(true);
+            console.log('📊 Fetching listening analytics...');
+            
+            const response = await fetch(`http://localhost:5000/log-listening?access_token=${accessToken}&userId=dashboard_user`);
+            
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            setListeningData(data);
+            console.log('✅ Listening analytics loaded!', data);
+            
+        } catch (error) {
+            console.error('❌ Error fetching listening analytics:', error);
+            alert('Failed to load listening analytics. Please try again.');
+        }
+    };
 
     // Extract tokens from URL or LocalStorage
     useEffect(() => {
@@ -24,18 +123,26 @@ function Dashboard() {
             // Save tokens for future use
             localStorage.setItem('spotify_access_token', access_token);
             localStorage.setItem('spotify_refresh_token', refresh_token);
+
+            // Clean URL after extracting tokens
+            if (params.get('access_token')) {
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
         }
     }, []);
 
-    // Fetch playlists
+    // Fetch playlists with token refresh
     useEffect(() => {
-        if (!accessToken) return;
+        if (!accessToken || !refreshToken) return;
 
         const fetchPlaylists = async () => {
             try {
-                const response = await fetch('https://api.spotify.com/v1/me/playlists', {
-                    headers: { Authorization: `Bearer ${accessToken}` }
-                });
+                const response = await spotifyFetch('https://api.spotify.com/v1/me/playlists');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
                 const data = await response.json();
 
                 // Add "Liked Songs" as the first fake playlist
@@ -49,19 +156,16 @@ function Dashboard() {
         };
 
         fetchPlaylists();
-    }, [accessToken]);
+    }, [accessToken, refreshToken]);
 
-
-    // Fetch all liked songs (with pagination)
+    // Fetch all liked songs (with pagination) - Updated with token refresh
     const fetchLikedSongs = async () => {
         setSelectedPlaylistName('❤️ Liked Songs');
         setShowSidebar(true);
         setLikedSongs([]);   // Clear any old songs
     
         try {
-            const response = await fetch('https://api.spotify.com/v1/me/tracks', {
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+            const response = await spotifyFetch('https://api.spotify.com/v1/me/tracks');
     
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -81,9 +185,7 @@ function Dashboard() {
         if (!nextLikedSongsUrl) return;  // No more pages
     
         try {
-            const response = await fetch(nextLikedSongsUrl, {
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+            const response = await spotifyFetch(nextLikedSongsUrl);
     
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -98,7 +200,6 @@ function Dashboard() {
             alert('Failed to load more liked songs. Please try again.');
         }
     };
-    
 
     const fetchPlaylistSongs = async(playlist) => {
         setSelectedPlaylistName(playlist.name); // Playlist has an id and a name
@@ -109,9 +210,7 @@ function Dashboard() {
         try {
             const firstPageUrl = `https://api.spotify.com/v1/playlists/${playlist.id}/tracks`;
 
-            const response = await fetch(firstPageUrl, {
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+            const response = await spotifyFetch(firstPageUrl);
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -130,9 +229,7 @@ function Dashboard() {
         if (!nextPlaylistSongsUrl) return;
     
         try {
-            const response = await fetch(nextPlaylistSongsUrl, {
-                headers: { Authorization: `Bearer ${accessToken}` }
-            });
+            const response = await spotifyFetch(nextPlaylistSongsUrl);
     
             const data = await response.json();
     
@@ -142,7 +239,6 @@ function Dashboard() {
             console.error('Error fetching more songs for playlist:', error);
         }
     };
-    
 
     const handlePlaylistClick = (playlist) => {
         if (playlist.id === 'liked-songs') {
@@ -151,6 +247,7 @@ function Dashboard() {
             fetchPlaylistSongs(playlist);
         }
     };
+
     const handleScroll = (event) => {
         const { scrollTop, scrollHeight, clientHeight } = event.target;
     
@@ -162,6 +259,30 @@ function Dashboard() {
                 loadMorePlaylistSongs();
             }
         }
+    };
+
+    // Add logout function
+    const handleLogout = () => {
+        // Clear tokens from state
+        setAccessToken('');
+        setRefreshToken('');
+        
+        // Clear tokens from localStorage
+        localStorage.removeItem('spotify_access_token');
+        localStorage.removeItem('spotify_refresh_token');
+        
+        // Clear other state
+        setPlaylists([]);
+        setLikedSongs([]);
+        setShowSidebar(false);
+        setSelectedPlaylistName('');
+        setNextLikedSongsUrl('');
+        setNextPlaylistSongsUrl('');
+        setListeningData(null);
+        setShowAnalytics(false);
+        
+        // Redirect to home page
+        navigate('/');
     };
 
     return (
@@ -178,30 +299,99 @@ function Dashboard() {
                 height: '100%',
                 padding: '30px',
                 transition: 'transform 0.3s ease-in-out',
-                transform: showSidebar ? 'translateX(-350px)' : 'translateX(0)',
+                transform: showSidebar || showAnalytics ? 'translateX(-350px)' : 'translateX(0)',
                 overflowY: 'auto'
             }}>
-                {/* Header */}
+                {/* Header with Logout Button */}
                 <div style={{
-                    marginBottom: '40px',
-                    textAlign: 'center'
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start',
+                    marginBottom: '40px'
                 }}>
-                    <h1 style={{
-                        color: 'white',
-                        fontSize: '3rem',
-                        fontWeight: 'bold',
-                        margin: '0 0 10px 0',
-                        textShadow: '0 2px 4px rgba(0,0,0,0.3)'
-                    }}>
-                        🎵 Spotify Dashboard
-                    </h1>
-                    <p style={{
-                        color: 'rgba(255,255,255,0.8)',
-                        fontSize: '1.1rem',
-                        margin: '0'
-                    }}>
-                        Discover and explore your music collection
-                    </p>
+                    <div style={{ flex: 1, textAlign: 'center' }}>
+                        <h1 style={{
+                            color: 'white',
+                            fontSize: '3rem',
+                            fontWeight: 'bold',
+                            margin: '0 0 10px 0',
+                            textShadow: '0 2px 4px rgba(0,0,0,0.3)'
+                        }}>
+                            🎵 Spotify Dashboard
+                        </h1>
+                        <p style={{
+                            color: 'rgba(255,255,255,0.8)',
+                            fontSize: '1.1rem',
+                            margin: '0'
+                        }}>
+                            Discover and explore your music collection
+                        </p>
+                    </div>
+                    
+                    {accessToken && (
+                        <div style={{ display: 'flex', gap: '10px', flexShrink: 0 }}>
+                            {/* NEW: Analytics Button */}
+                            <button
+                                onClick={fetchListeningAnalytics}
+                                style={{
+                                    background: 'rgba(156, 39, 176, 0.2)',
+                                    border: '2px solid #9c27b0',
+                                    borderRadius: '12px',
+                                    color: '#9c27b0',
+                                    padding: '12px 20px',
+                                    cursor: 'pointer',
+                                    fontSize: '1rem',
+                                    fontWeight: 'bold',
+                                    transition: 'all 0.3s ease',
+                                    backdropFilter: 'blur(10px)'
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.target.style.background = '#9c27b0';
+                                    e.target.style.color = 'white';
+                                    e.target.style.transform = 'translateY(-2px)';
+                                    e.target.style.boxShadow = '0 5px 15px rgba(156, 39, 176, 0.4)';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.target.style.background = 'rgba(156, 39, 176, 0.2)';
+                                    e.target.style.color = '#9c27b0';
+                                    e.target.style.transform = 'translateY(0)';
+                                    e.target.style.boxShadow = 'none';
+                                }}
+                            >
+                                📊 Analytics
+                            </button>
+                            
+                            <button
+                                onClick={handleLogout}
+                                style={{
+                                    background: 'rgba(231, 76, 60, 0.2)',
+                                    border: '2px solid #e74c3c',
+                                    borderRadius: '12px',
+                                    color: '#e74c3c',
+                                    padding: '12px 20px',
+                                    cursor: 'pointer',
+                                    fontSize: '1rem',
+                                    fontWeight: 'bold',
+                                    transition: 'all 0.3s ease',
+                                    backdropFilter: 'blur(10px)'
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.target.style.background = '#e74c3c';
+                                    e.target.style.color = 'white';
+                                    e.target.style.transform = 'translateY(-2px)';
+                                    e.target.style.boxShadow = '0 5px 15px rgba(231, 76, 60, 0.4)';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.target.style.background = 'rgba(231, 76, 60, 0.2)';
+                                    e.target.style.color = '#e74c3c';
+                                    e.target.style.transform = 'translateY(0)';
+                                    e.target.style.boxShadow = 'none';
+                                }}
+                            >
+                                🚪 Logout
+                            </button>
+                        </div>
+                    )}
                 </div>
 
                 {/* Connection Status */}
@@ -238,6 +428,32 @@ function Dashboard() {
                         }}>
                             ❌ Not Connected to Spotify
                         </span>
+                        <div style={{ marginTop: '10px' }}>
+                            <button
+                                onClick={() => navigate('/')}
+                                style={{
+                                    background: 'rgba(29, 185, 84, 0.2)',
+                                    border: '2px solid #1db954',
+                                    borderRadius: '8px',
+                                    color: '#1db954',
+                                    padding: '8px 16px',
+                                    cursor: 'pointer',
+                                    fontSize: '0.9rem',
+                                    fontWeight: 'bold',
+                                    transition: 'all 0.2s ease'
+                                }}
+                                onMouseEnter={(e) => {
+                                    e.target.style.background = '#1db954';
+                                    e.target.style.color = 'white';
+                                }}
+                                onMouseLeave={(e) => {
+                                    e.target.style.background = 'rgba(29, 185, 84, 0.2)';
+                                    e.target.style.color = '#1db954';
+                                }}
+                            >
+                                Go to Login
+                            </button>
+                        </div>
                     </div>
                 )}
 
@@ -316,11 +532,11 @@ function Dashboard() {
                 </div>
             </div>
 
-            {/* Sliding Sidebar */}
+            {/* Playlist Sidebar (existing) */}
             <div style={{
                 position: 'fixed',
                 top: '0',
-                right: showSidebar ? '0' : '-400px',
+                right: showSidebar && !showAnalytics ? '0' : '-400px',
                 width: '400px',
                 height: '100vh',
                 background: 'rgba(25, 20, 20, 0.95)',
@@ -331,7 +547,6 @@ function Dashboard() {
                 display: 'flex',
                 flexDirection: 'column'
             }}>
-                {/* Sidebar Header */}
                 <div style={{
                     padding: '20px',
                     borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
@@ -385,7 +600,6 @@ function Dashboard() {
                     </p>
                 </div>
 
-                {/* Songs List */}
                 <div
                     style={{
                         flex: 1,
@@ -460,8 +674,150 @@ function Dashboard() {
                 </div>
             </div>
 
+            {/* NEW: Analytics Sidebar */}
+            <div style={{
+                position: 'fixed',
+                top: '0',
+                right: showAnalytics ? '0' : '-400px',
+                width: '400px',
+                height: '100vh',
+                background: 'rgba(25, 20, 20, 0.95)',
+                backdropFilter: 'blur(15px)',
+                borderLeft: '1px solid rgba(255, 255, 255, 0.1)',
+                transition: 'right 0.3s ease-in-out',
+                zIndex: 1000,
+                display: 'flex',
+                flexDirection: 'column'
+            }}>
+                <div style={{
+                    padding: '20px',
+                    borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                    background: 'rgba(156, 39, 176, 0.1)'
+                }}>
+                    <div style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        marginBottom: '10px'
+                    }}>
+                        <h2 style={{
+                            color: 'white',
+                            fontSize: '1.5rem',
+                            margin: '0'
+                        }}>
+                            📊 Listening Analytics
+                        </h2>
+                        <button
+                            onClick={() => setShowAnalytics(false)}
+                            style={{
+                                background: 'rgba(231, 76, 60, 0.2)',
+                                border: '1px solid #e74c3c',
+                                borderRadius: '8px',
+                                color: '#e74c3c',
+                                padding: '8px 12px',
+                                cursor: 'pointer',
+                                fontSize: '0.9rem',
+                                fontWeight: 'bold',
+                                transition: 'all 0.2s ease'
+                            }}
+                            onMouseEnter={(e) => {
+                                e.target.style.background = '#e74c3c';
+                                e.target.style.color = 'white';
+                            }}
+                            onMouseLeave={(e) => {
+                                e.target.style.background = 'rgba(231, 76, 60, 0.2)';
+                                e.target.style.color = '#e74c3c';
+                            }}
+                        >
+                            ✕ Close
+                        </button>
+                    </div>
+                    <p style={{
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        fontSize: '0.9rem',
+                        margin: '0'
+                    }}>
+                        {listeningData ? `${listeningData.data?.length || 0} recent tracks analyzed` : 'Loading...'}
+                    </p>
+                </div>
+
+                <div style={{
+                    flex: 1,
+                    overflowY: 'auto',
+                    padding: '20px'
+                }}>
+                    {listeningData ? (
+                        <div>
+                            {/* Summary Stats */}
+                            <div style={{
+                                background: 'rgba(156, 39, 176, 0.1)',
+                                borderRadius: '12px',
+                                padding: '15px',
+                                marginBottom: '20px'
+                            }}>
+                                <h3 style={{ color: 'white', margin: '0 0 10px 0' }}>Summary</h3>
+                                <div style={{ color: 'rgba(255, 255, 255, 0.8)', fontSize: '0.9rem' }}>
+                                    <p>📈 Total Tracks: {listeningData.data?.length || 0}</p>
+                                    <p>🎤 Unique Artists: {listeningData.summary?.uniqueArtists || 'N/A'}</p>
+                                    <p>⏰ Time Range: {listeningData.summary?.timeRange ? 'Recent activity' : 'Loading...'}</p>
+                                </div>
+                            </div>
+
+                            {/* Recent Tracks */}
+                            <h3 style={{ color: 'white', marginBottom: '15px' }}>Recent Tracks</h3>
+                            {listeningData.data?.map((track, index) => (
+                                <div
+                                    key={track.trackId || index}
+                                    style={{
+                                        background: 'rgba(255, 255, 255, 0.05)',
+                                        borderRadius: '8px',
+                                        padding: '12px',
+                                        marginBottom: '10px',
+                                        border: '1px solid rgba(255, 255, 255, 0.1)'
+                                    }}
+                                >
+                                    <div style={{
+                                        color: 'white',
+                                        fontSize: '0.95rem',
+                                        fontWeight: '500',
+                                        marginBottom: '4px'
+                                    }}>
+                                        {track.trackName}
+                                    </div>
+                                    <div style={{
+                                        color: 'rgba(255, 255, 255, 0.7)',
+                                        fontSize: '0.8rem',
+                                        marginBottom: '6px'
+                                    }}>
+                                        {track.artist}
+                                    </div>
+                                    <div style={{
+                                        display: 'flex',
+                                        justifyContent: 'space-between',
+                                        fontSize: '0.75rem',
+                                        color: 'rgba(255, 255, 255, 0.5)'
+                                    }}>
+                                        <span>🕐 {track.timeOfDay}</span>
+                                        <span>⭐ {track.popularity || 'N/A'}</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div style={{
+                            textAlign: 'center',
+                            color: 'rgba(255, 255, 255, 0.5)',
+                            padding: '40px 20px'
+                        }}>
+                            <div style={{ fontSize: '3rem', marginBottom: '20px' }}>📊</div>
+                            <p>Loading your listening analytics...</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+
             {/* Overlay when sidebar is open */}
-            {showSidebar && (
+            {(showSidebar || showAnalytics) && (
                 <div
                     style={{
                         position: 'fixed',
@@ -472,7 +828,10 @@ function Dashboard() {
                         background: 'rgba(0, 0, 0, 0.3)',
                         zIndex: 999
                     }}
-                    onClick={() => setShowSidebar(false)}
+                    onClick={() => {
+                        setShowSidebar(false);
+                        setShowAnalytics(false);
+                    }}
                 />
             )}
         </div>
