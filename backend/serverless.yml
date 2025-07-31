@@ -1,0 +1,23 @@
+service: spotify-playlist-api
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  environment:
+    SPOTIFY_CLIENT_ID:     ${env:SPOTIFY_CLIENT_ID}
+    SPOTIFY_CLIENT_SECRET: ${env:SPOTIFY_CLIENT_SECRET}
+    SPOTIFY_REDIRECT_URI:  ${env:SPOTIFY_REDIRECT_URI}
+    OPENWEATHER_API_KEY:   ${env:OPENWEATHER_API_KEY}
+
+
+functions:
+  app:
+    handler: lambda.handler
+    events:
+      - http:
+          path: /
+          method: any
+      - http:
+          path: /{proxy+}
+          method: any
