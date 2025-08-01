@@ -28,6 +28,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
         working-directory: backend
+        
+      - name: Debug AWS identity & buckets
+        run: |
+          echo "Caller identity:"
+          aws sts get-caller-identity
+          echo "List S3 buckets:"
+          aws s3 ls
 
       - name: Deploy with Serverless
         env:
