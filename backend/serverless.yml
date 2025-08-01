@@ -4,6 +4,8 @@ provider:
   name: aws
   runtime: nodejs18.x
   region: us-east-1
+  deploymentBucket:
+    name: spotify-playlist-api-deploy-bucket
   environment:
     SPOTIFY_CLIENT_ID:     ${env:SPOTIFY_CLIENT_ID}
     SPOTIFY_CLIENT_SECRET: ${env:SPOTIFY_CLIENT_SECRET}
