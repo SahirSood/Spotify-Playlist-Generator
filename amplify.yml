@@ -1,0 +1,21 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      # move into your CRA folder and install deps
+      commands:
+        - cd frontend
+        - npm ci
+    build:
+      # build your production bundle
+      commands:
+        - npm run build
+  artifacts:
+    # where the built files live
+    baseDirectory: frontend/build
+    files:
+      - '**/*'
+  cache:
+    # keep your node_modules between builds
+    paths:
+      - frontend/node_modules/**/*
