@@ -4,6 +4,8 @@ provider:
   name: aws
   runtime: nodejs18.x
   region: us-east-1
+  timeout: 60
+  memorySize: 512
   deploymentBucket:
     name: spotify-playlist-api-deploy-bucket
   environment:
@@ -11,15 +13,157 @@ provider:
     SPOTIFY_CLIENT_SECRET: ${env:SPOTIFY_CLIENT_SECRET}
     SPOTIFY_REDIRECT_URI:  ${env:SPOTIFY_REDIRECT_URI}
     OPENWEATHER_API_KEY:   ${env:OPENWEATHER_API_KEY}
-
+    OPENAI_API_KEY:        ${env:OPENAI_API_KEY}
+    ML_LAMBDA_ARN:         ${env:ML_LAMBDA_ARN, ''}
+    DYNAMODB_REGION:       us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchGetItem
+            - dynamodb:BatchWriteItem
+          Resource:
+            - arn:aws:dynamodb:us-east-1:*:table/ListeningEvents
+            - arn:aws:dynamodb:us-east-1:*:table/ListeningEvents/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/SongFeatures
+            - arn:aws:dynamodb:us-east-1:*:table/UserClusters
+            - arn:aws:dynamodb:us-east-1:*:table/UserClusters/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/GeneratedPlaylists
+            - arn:aws:dynamodb:us-east-1:*:table/UserMeta
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - kms:GenerateDataKey
+            - kms:Decrypt
+          Resource: "*"
 
 functions:
   app:
     handler: lambda.handler
+    timeout: 60
     events:
       - http:
           path: /
           method: any
+          cors: true
       - http:
           path: /{proxy+}
           method: any
+          cors: true
+
+  syncListening:
+    handler: collectors/syncListening.handler
+    timeout: 300
+    memorySize: 512
+    events:
+      - schedule:
+          rate: rate(30 minutes)
+          enabled: true
+          input:
+            action: scheduled_sync
+
+resources:
+  Resources:
+    ListeningEventsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ListeningEvents
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: playedAt
+            AttributeType: S
+          - AttributeName: trackId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: playedAt
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: trackId-index
+            KeySchema:
+              - AttributeName: trackId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+
+    SongFeaturesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: SongFeatures
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: trackId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: trackId
+            KeyType: HASH
+
+    UserClustersTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: UserClusters
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: clusterId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: clusterId
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: userId-createdAt-index
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    GeneratedPlaylistsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: GeneratedPlaylists
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: generatedAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: generatedAt
+            KeyType: RANGE
+
+    UserMetaTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: UserMeta
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH

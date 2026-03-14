@@ -2,7 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const querystring = require('querystring');
 const axios = require('axios');
+const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 require('dotenv').config();
+
+const lambdaClient = new LambdaClient({ region: process.env.DYNAMODB_REGION || 'us-east-1' });
+const { getItem, putItem, queryItems } = require('./services/dynamodb');
+const { saveUserTokens, getUserTokens, setProcessing } = require('./services/tokenStore');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -44,7 +49,7 @@ const generateRandomString = (length) => {
 // Login route - redirects to Spotify
 app.get('/login', (req, res) => {
   const state = generateRandomString(16);
-  const scope = 'user-read-private user-read-email playlist-read-private user-library-read user-read-recently-played user-read-playback-state';
+  const scope = 'user-read-private user-read-email playlist-read-private user-library-read user-read-recently-played user-read-playback-state playlist-modify-public playlist-modify-private';
 
   res.redirect('https://accounts.spotify.com/authorize?' +
     querystring.stringify({
@@ -282,22 +287,220 @@ function getTimeOfDay(date) {
   return 'night';
 }
 
+// ── ML / Playlist endpoints ────────────────────────────────────────────────────
+
+// POST /save-tokens — store tokens after OAuth for background sync
+app.post('/save-tokens', async (req, res) => {
+  const { user_id, access_token, refresh_token } = req.body;
+  if (!user_id || !access_token || !refresh_token) {
+    return res.status(400).json({ error: 'user_id, access_token and refresh_token are required' });
+  }
+  try {
+    await saveUserTokens(user_id, { accessToken: access_token, refreshToken: refresh_token });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('save-tokens error:', err);
+    res.status(500).json({ error: 'Failed to save tokens' });
+  }
+});
+
+// POST /sync-and-cluster — manually trigger data sync + recluster
+app.post('/sync-and-cluster', async (req, res) => {
+  const { user_id, access_token, refresh_token } = req.body;
+  if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+
+  try {
+    // Persist tokens so background Lambda can use them
+    if (access_token && refresh_token) {
+      await saveUserTokens(user_id, { accessToken: access_token, refreshToken: refresh_token });
+    }
+    await setProcessing(user_id, true);
+
+    const syncArn = process.env.SYNC_LAMBDA_ARN || null;
+    const mlArn = process.env.ML_LAMBDA_ARN || null;
+
+    // Async invoke both Lambdas (fire and forget)
+    if (syncArn) {
+      await lambdaClient.send(new InvokeCommand({
+        FunctionName: syncArn,
+        InvocationType: 'Event',
+        Payload: JSON.stringify({ userId: user_id }),
+      }));
+    }
+    if (mlArn) {
+      await lambdaClient.send(new InvokeCommand({
+        FunctionName: mlArn,
+        InvocationType: 'Event',
+        Payload: JSON.stringify({ action: 'run_clustering', userId: user_id }),
+      }));
+    }
+
+    res.status(202).json({ message: 'Sync and cluster started. Check /cluster-status for updates.' });
+  } catch (err) {
+    console.error('sync-and-cluster error:', err);
+    res.status(500).json({ error: 'Failed to start sync' });
+  }
+});
+
+// GET /clusters — fetch latest clusters for a user
+app.get('/clusters', async (req, res) => {
+  const { user_id } = req.query;
+  if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+
+  try {
+    const items = await queryItems(
+      'UserClusters',
+      'userId = :uid',
+      { ':uid': user_id }
+    );
+    res.json({ clusters: items });
+  } catch (err) {
+    console.error('clusters error:', err);
+    res.status(500).json({ error: 'Failed to fetch clusters' });
+  }
+});
+
+// GET /cluster-status — sync status for the user
+app.get('/cluster-status', async (req, res) => {
+  const { user_id } = req.query;
+  if (!user_id) return res.status(400).json({ error: 'user_id is required' });
+
+  try {
+    const meta = await getItem('UserMeta', { userId: user_id });
+    const clusterItems = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
+    res.json({
+      lastSyncAt: meta?.lastSyncAt || null,
+      clusterCount: clusterItems.length,
+      isProcessing: meta?.isProcessing || false,
+    });
+  } catch (err) {
+    console.error('cluster-status error:', err);
+    res.status(500).json({ error: 'Failed to get status' });
+  }
+});
+
+// POST /generate-playlist — natural language playlist generation
+app.post('/generate-playlist', async (req, res) => {
+  const { access_token, user_id, request: userRequest } = req.body;
+  if (!access_token || !user_id || !userRequest) {
+    return res.status(400).json({ error: 'access_token, user_id, and request are required' });
+  }
+
+  try {
+    // Fetch user's clusters
+    const clusters = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
+    if (!clusters.length) {
+      return res.status(400).json({ error: 'No clusters found. Please sync your listening data first.' });
+    }
+
+    // Ask Python Lambda to pick the best cluster
+    const mlArn = process.env.ML_LAMBDA_ARN;
+    if (!mlArn) return res.status(500).json({ error: 'ML service not configured' });
+
+    const matchPayload = {
+      action: 'match_cluster',
+      userId: user_id,
+      userRequest,
+      clusters: clusters.map((c) => ({
+        clusterId: c.clusterId,
+        clusterLabel: c.clusterLabel,
+        clusterDescription: c.clusterDescription,
+        avgEnergy: c.avgEnergy,
+        avgValence: c.avgValence,
+      })),
+    };
+
+    const invResult = await lambdaClient.send(new InvokeCommand({
+      FunctionName: mlArn,
+      InvocationType: 'RequestResponse',
+      Payload: JSON.stringify(matchPayload),
+    }));
+
+    const mlResponse = JSON.parse(Buffer.from(invResult.Payload).toString());
+    const { clusterId, rationale } = mlResponse.body || mlResponse;
+
+    // Find the matched cluster
+    const matchedCluster = clusters.find((c) => c.clusterId === clusterId);
+    if (!matchedCluster) return res.status(400).json({ error: 'Cluster match failed' });
+
+    // Get track URIs from cluster (shuffle and cap at 30)
+    const trackIds = [...(matchedCluster.trackIds || [])].sort(() => Math.random() - 0.5).slice(0, 30);
+    const trackUris = trackIds.map((id) => `spotify:track:${id}`);
+
+    // Get Spotify user profile
+    const profileRes = await axios.get('https://api.spotify.com/v1/me', {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+    const spotifyUserId = profileRes.data.id;
+
+    // Create Spotify playlist
+    const playlistName = matchedCluster.clusterLabel;
+    const createRes = await axios.post(
+      `https://api.spotify.com/v1/users/${spotifyUserId}/playlists`,
+      { name: playlistName, description: matchedCluster.clusterDescription, public: false },
+      { headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' } }
+    );
+    const playlistId = createRes.data.id;
+    const playlistUrl = createRes.data.external_urls?.spotify;
+
+    // Add tracks
+    if (trackUris.length > 0) {
+      await axios.post(
+        `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
+        { uris: trackUris },
+        { headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Record in DynamoDB
+    await putItem('GeneratedPlaylists', {
+      userId: user_id,
+      generatedAt: new Date().toISOString(),
+      playlistId,
+      playlistName,
+      userRequest,
+      matchedClusterId: clusterId,
+      clusterLabel: matchedCluster.clusterLabel,
+      gptRationale: rationale || '',
+      trackIds,
+      spotifyUrl: playlistUrl,
+    });
+
+    res.json({
+      playlistUrl,
+      playlistName,
+      clusterLabel: matchedCluster.clusterLabel,
+      rationale,
+      trackCount: trackUris.length,
+    });
+  } catch (err) {
+    console.error('generate-playlist error:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to generate playlist', details: err.message });
+  }
+});
+
 // Health check
 app.get('/', (req, res) => {
-  res.json({ 
+  res.json({
     message: 'Spotify Playlist Generator Backend is running!',
     endpoints: [
       'GET /login - Start Spotify OAuth',
       'GET /callback - OAuth callback',
       'POST /refresh - Refresh access token',
       'GET /log-listening - Get listening analytics',
-      'POST /log-listening - Log listening data'
+      'POST /log-listening - Log listening data',
+      'POST /save-tokens - Store OAuth tokens for background sync',
+      'POST /sync-and-cluster - Trigger data sync and clustering',
+      'GET /clusters - Get user music clusters',
+      'GET /cluster-status - Get sync status',
+      'POST /generate-playlist - Generate playlist from natural language request',
     ]
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Login URL: http://localhost:${PORT}/login`);
-  console.log(`📊 Log Listening URL: http://localhost:${PORT}/log-listening`);
-});
+if (!process.env.AWS_EXECUTION_ENV) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Login URL: http://localhost:${PORT}/login`);
+  });
+}
