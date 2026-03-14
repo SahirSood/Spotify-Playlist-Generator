@@ -1,5 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import GeneratePlaylist from "./GeneratePlaylist";
+import ClusterView from "./ClusterView";
+import SyncStatus from "./SyncStatus";
+import { fetchClusters, fetchClusterStatus, saveClusters } from "./api";
+
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
 function Dashboard() {
     const navigate = useNavigate();
@@ -14,6 +20,12 @@ function Dashboard() {
     // NEW: Add listening analytics state
     const [listeningData, setListeningData] = useState(null);
     const [showAnalytics, setShowAnalytics] = useState(false);
+    const [userId, setUserId] = useState('');
+    const [clusters, setClusters] = useState([]);
+    const [syncStatus, setSyncStatus] = useState(null);
+    const [showGenerateModal, setShowGenerateModal] = useState(false);
+    const [showClusters, setShowClusters] = useState(false);
+    const [generatePrefill, setGeneratePrefill] = useState('');
 
     // Function to refresh access token
     const refreshAccessToken = async () => {
@@ -24,7 +36,7 @@ function Dashboard() {
         }
 
         try {
-            const response = await fetch('http://localhost:5000/refresh', {
+            const response = await fetch(`${API_BASE}/refresh`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -94,7 +106,7 @@ function Dashboard() {
             setShowAnalytics(true);
             console.log('📊 Fetching listening analytics...');
             
-            const response = await fetch(`http://localhost:5000/log-listening?access_token=${accessToken}&userId=dashboard_user`);
+            const response = await fetch(`${API_BASE}/log-listening?access_token=${accessToken}&userId=dashboard_user`);
             
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
@@ -110,6 +122,20 @@ function Dashboard() {
         }
     };
 
+    // Load clusters/status when userId is available
+    const loadClusterData = useCallback(async (uid) => {
+        try {
+            const [clusterRes, statusRes] = await Promise.all([
+                fetchClusters(uid),
+                fetchClusterStatus(uid),
+            ]);
+            setClusters(clusterRes.clusters || []);
+            setSyncStatus(statusRes);
+        } catch (err) {
+            console.error('Failed to load cluster data:', err);
+        }
+    }, []);
+
     // Extract tokens from URL or LocalStorage
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
@@ -120,16 +146,29 @@ function Dashboard() {
             setAccessToken(access_token);
             setRefreshToken(refresh_token);
 
-            // Save tokens for future use
             localStorage.setItem('spotify_access_token', access_token);
             localStorage.setItem('spotify_refresh_token', refresh_token);
 
-            // Clean URL after extracting tokens
             if (params.get('access_token')) {
                 window.history.replaceState({}, document.title, window.location.pathname);
             }
+
+            // Fetch Spotify user profile to get userId, then load clusters
+            fetch('https://api.spotify.com/v1/me', {
+                headers: { Authorization: `Bearer ${access_token}` },
+            })
+                .then((r) => r.json())
+                .then((profile) => {
+                    const uid = `spotify:user:${profile.id}`;
+                    setUserId(uid);
+                    localStorage.setItem('spotify_user_id', uid);
+                    // Persist tokens to backend for background sync
+                    saveClusters(uid, access_token, refresh_token).catch(() => {});
+                    loadClusterData(uid);
+                })
+                .catch(() => {});
         }
-    }, []);
+    }, [loadClusterData]);
 
     // Fetch playlists with token refresh
     useEffect(() => {
@@ -280,7 +319,11 @@ function Dashboard() {
         setNextPlaylistSongsUrl('');
         setListeningData(null);
         setShowAnalytics(false);
-        
+        setClusters([]);
+        setSyncStatus(null);
+        setShowClusters(false);
+        setShowGenerateModal(false);
+
         // Redirect to home page
         navigate('/');
     };
@@ -329,8 +372,44 @@ function Dashboard() {
                     </div>
                     
                     {accessToken && (
-                        <div style={{ display: 'flex', gap: '10px', flexShrink: 0 }}>
-                            {/* NEW: Analytics Button */}
+                        <div style={{ display: 'flex', gap: '10px', flexShrink: 0, flexWrap: 'wrap' }}>
+                            {/* Generate Playlist Button */}
+                            <button
+                                onClick={() => { setGeneratePrefill(''); setShowGenerateModal(true); }}
+                                style={{
+                                    background: 'rgba(29, 185, 84, 0.2)',
+                                    border: '2px solid #1db954',
+                                    borderRadius: '12px',
+                                    color: '#1db954',
+                                    padding: '12px 20px',
+                                    cursor: 'pointer',
+                                    fontSize: '1rem',
+                                    fontWeight: 'bold',
+                                    transition: 'all 0.3s ease',
+                                }}
+                            >
+                                ✨ Generate Playlist
+                            </button>
+
+                            {/* My Music Clusters Button */}
+                            <button
+                                onClick={() => setShowClusters(true)}
+                                style={{
+                                    background: 'rgba(52, 152, 219, 0.2)',
+                                    border: '2px solid #3498db',
+                                    borderRadius: '12px',
+                                    color: '#3498db',
+                                    padding: '12px 20px',
+                                    cursor: 'pointer',
+                                    fontSize: '1rem',
+                                    fontWeight: 'bold',
+                                    transition: 'all 0.3s ease',
+                                }}
+                            >
+                                🧠 My Music Clusters
+                            </button>
+
+                            {/* Analytics Button */}
                             <button
                                 onClick={fetchListeningAnalytics}
                                 style={{
@@ -455,6 +534,20 @@ function Dashboard() {
                             </button>
                         </div>
                     </div>
+                )}
+
+                {/* Sync Status Bar */}
+                {accessToken && userId && (
+                    <SyncStatus
+                        userId={userId}
+                        accessToken={accessToken}
+                        refreshToken={refreshToken}
+                        status={syncStatus}
+                        onStatusChange={(s) => {
+                            setSyncStatus(s);
+                            if (!s.isProcessing) loadClusterData(userId);
+                        }}
+                    />
                 )}
 
                 {/* Playlists Grid */}
@@ -816,8 +909,42 @@ function Dashboard() {
                 </div>
             </div>
 
+            {/* Clusters Sidebar */}
+            <div style={{
+                position: 'fixed',
+                top: '0',
+                right: showClusters ? '0' : '-500px',
+                width: '480px',
+                height: '100vh',
+                background: 'rgba(15, 15, 25, 0.97)',
+                backdropFilter: 'blur(15px)',
+                borderLeft: '1px solid rgba(255, 255, 255, 0.1)',
+                transition: 'right 0.3s ease-in-out',
+                zIndex: 1000,
+                display: 'flex',
+                flexDirection: 'column',
+                overflowY: 'auto',
+                padding: '20px',
+            }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <h2 style={{ color: '#fff', margin: 0, fontSize: '1.4rem' }}>🧠 My Music Clusters</h2>
+                    <button
+                        onClick={() => setShowClusters(false)}
+                        style={{ background: 'transparent', border: 'none', color: '#aaa', fontSize: '1.4rem', cursor: 'pointer' }}
+                    >✕</button>
+                </div>
+                <ClusterView
+                    clusters={clusters}
+                    onGenerateFromCluster={(label) => {
+                        setShowClusters(false);
+                        setGeneratePrefill(label);
+                        setShowGenerateModal(true);
+                    }}
+                />
+            </div>
+
             {/* Overlay when sidebar is open */}
-            {(showSidebar || showAnalytics) && (
+            {(showSidebar || showAnalytics || showClusters) && (
                 <div
                     style={{
                         position: 'fixed',
@@ -831,7 +958,18 @@ function Dashboard() {
                     onClick={() => {
                         setShowSidebar(false);
                         setShowAnalytics(false);
+                        setShowClusters(false);
                     }}
+                />
+            )}
+
+            {/* Generate Playlist Modal */}
+            {showGenerateModal && (
+                <GeneratePlaylist
+                    userId={userId}
+                    accessToken={accessToken}
+                    initialRequest={generatePrefill}
+                    onClose={() => setShowGenerateModal(false)}
                 />
             )}
         </div>
