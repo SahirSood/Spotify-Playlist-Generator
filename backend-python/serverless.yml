@@ -1,0 +1,60 @@
+service: spotify-ml-pipeline
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: us-east-1
+  timeout: 900
+  memorySize: 3008
+  deploymentBucket:
+    name: spotify-playlist-api-deploy-bucket
+  environment:
+    OPENAI_API_KEY:  ${env:OPENAI_API_KEY}
+    DYNAMODB_REGION: us-east-1
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchGetItem
+            - dynamodb:BatchWriteItem
+          Resource:
+            - arn:aws:dynamodb:us-east-1:*:table/ListeningEvents
+            - arn:aws:dynamodb:us-east-1:*:table/ListeningEvents/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/SongFeatures
+            - arn:aws:dynamodb:us-east-1:*:table/UserClusters
+            - arn:aws:dynamodb:us-east-1:*:table/UserClusters/index/*
+            - arn:aws:dynamodb:us-east-1:*:table/UserMeta
+
+functions:
+  mlPipeline:
+    handler: handler.handler
+    layers:
+      - !Ref SklearnLambdaLayer
+
+  nightlyCluster:
+    handler: handler.handler
+    timeout: 900
+    memorySize: 3008
+    layers:
+      - !Ref SklearnLambdaLayer
+    events:
+      - schedule:
+          rate: cron(0 4 * * ? *)
+          enabled: true
+          input:
+            action: run_clustering
+
+layers:
+  Sklearn:
+    name: sklearn-numpy-layer
+    description: scikit-learn, numpy, scipy, openai for Lambda
+    compatibleRuntimes:
+      - python3.11
+    package:
+      artifact: layers/sklearn-layer.zip
