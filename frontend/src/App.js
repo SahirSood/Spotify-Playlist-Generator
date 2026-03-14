@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
 import Dashboard from './Dashboard';
+import { getLoginUrl } from './api';
 import './App.css';
 
 function HomePage() {
@@ -44,7 +45,7 @@ function HomePage() {
                     Connect your Spotify account to explore your playlists and discover your music collection
                 </p>
                 <a
-                    href="http://localhost:5000/login"
+                    href={getLoginUrl()}
                     style={{
                         display: 'inline-block',
                         background: '#1db954',
