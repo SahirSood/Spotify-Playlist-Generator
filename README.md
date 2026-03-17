@@ -11,9 +11,11 @@ A full-stack Spotify app that:
 
 ## Project Structure
 
+- `AGENTS.md`: repo-level instructions for coding agents; points them to the PRD first
 - `frontend/`: React app hosted locally or on Amplify
 - `backend/`: Node/Express API deployed to AWS Lambda + API Gateway
 - `backend-python/`: Python ML Lambda for feature extraction, clustering, and cluster matching
+- `docs/PRD.md`: canonical product and architecture brief for future implementation sessions
 
 ## What You Need
 
