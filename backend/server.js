@@ -18,6 +18,7 @@ app.use(express.json());
 // Spotify OAuth endpoints
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 
 async function getAppAccessToken() {
   const creds = Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
@@ -36,6 +37,41 @@ async function getAppAccessToken() {
 
 const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'http://localhost:5000/callback';
 
+function parseCookies(cookieHeader = '') {
+  return cookieHeader
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((cookies, part) => {
+      const separatorIndex = part.indexOf('=');
+      if (separatorIndex === -1) return cookies;
+      const key = part.slice(0, separatorIndex);
+      const value = part.slice(separatorIndex + 1);
+      cookies[key] = decodeURIComponent(value);
+      return cookies;
+    }, {});
+}
+
+function setOAuthStateCookie(res, state) {
+  const cookieParts = [
+    `spotify_oauth_state=${encodeURIComponent(state)}`,
+    'HttpOnly',
+    'Path=/',
+    'Max-Age=600',
+    'SameSite=Lax',
+  ];
+
+  if (FRONTEND_URL.startsWith('https://')) {
+    cookieParts.push('Secure');
+  }
+
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function clearOAuthStateCookie(res) {
+  res.setHeader('Set-Cookie', 'spotify_oauth_state=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax');
+}
+
 // Generate random string for state parameter
 const generateRandomString = (length) => {
   let text = '';
@@ -50,6 +86,7 @@ const generateRandomString = (length) => {
 app.get('/login', (req, res) => {
   const state = generateRandomString(16);
   const scope = 'user-read-private user-read-email playlist-read-private user-library-read user-read-recently-played user-read-playback-state playlist-modify-public playlist-modify-private';
+  setOAuthStateCookie(res, state);
 
   res.redirect('https://accounts.spotify.com/authorize?' +
     querystring.stringify({
@@ -65,9 +102,11 @@ app.get('/login', (req, res) => {
 app.get('/callback', async (req, res) => {
   const code = req.query.code || null;
   const state = req.query.state || null;
+  const storedState = parseCookies(req.headers.cookie).spotify_oauth_state || null;
 
-  if (state === null) {
-    res.redirect('/#' + querystring.stringify({ error: 'state_mismatch' }));
+  if (state === null || storedState === null || state !== storedState) {
+    clearOAuthStateCookie(res);
+    res.redirect(`${FRONTEND_URL}/dashboard?` + querystring.stringify({ error: 'state_mismatch' }));
   } else {
     try {
       const response = await axios.post('https://accounts.spotify.com/api/token', 
@@ -85,6 +124,7 @@ app.get('/callback', async (req, res) => {
       );
 
       const { access_token, refresh_token } = response.data;
+      clearOAuthStateCookie(res);
 
       // Log the access token for debugging
       console.log('✅ Tokens received successfully');
@@ -93,15 +133,16 @@ app.get('/callback', async (req, res) => {
 
       // Redirect to frontend with tokens
       res.redirect(
-        `http://localhost:3000/dashboard?${querystring.stringify({
+        `${FRONTEND_URL}/dashboard?${querystring.stringify({
           access_token,
           refresh_token
         })}`
       );
 
     } catch (error) {
+      clearOAuthStateCookie(res);
       console.error('Error getting tokens:', error.response?.data || error.message);
-      res.redirect(`http://localhost:3000/dashboard?` +
+      res.redirect(`${FRONTEND_URL}/dashboard?` +
         querystring.stringify({ error: 'invalid_token' }));
     }
   }
@@ -504,3 +545,5 @@ if (!process.env.AWS_EXECUTION_ENV) {
     console.log(`Login URL: http://localhost:${PORT}/login`);
   });
 }
+
+module.exports = app;
