@@ -6,15 +6,16 @@ provider:
   region: us-east-1
   timeout: 60
   memorySize: 512
-  deploymentBucket:
-    name: spotify-playlist-api-deploy-bucket
   environment:
     SPOTIFY_CLIENT_ID:     ${env:SPOTIFY_CLIENT_ID}
     SPOTIFY_CLIENT_SECRET: ${env:SPOTIFY_CLIENT_SECRET}
     SPOTIFY_REDIRECT_URI:  ${env:SPOTIFY_REDIRECT_URI}
+    FRONTEND_URL:          ${env:FRONTEND_URL, 'http://localhost:3000'}
     OPENWEATHER_API_KEY:   ${env:OPENWEATHER_API_KEY}
     OPENAI_API_KEY:        ${env:OPENAI_API_KEY}
     ML_LAMBDA_ARN:         ${env:ML_LAMBDA_ARN, ''}
+    SYNC_LAMBDA_ARN:       ${env:SYNC_LAMBDA_ARN, ''}
+    KMS_KEY_ARN:           ${env:KMS_KEY_ARN, ''}
     DYNAMODB_REGION:       us-east-1
   iam:
     role:
