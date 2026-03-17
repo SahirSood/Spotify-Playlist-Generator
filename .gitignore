@@ -31,3 +31,8 @@ backend\.env
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# local AI assistant/project tooling
+.claude/
+.codex/
+**/__pycache__/

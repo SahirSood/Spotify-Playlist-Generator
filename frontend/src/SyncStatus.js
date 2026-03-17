@@ -42,28 +42,96 @@ export default function SyncStatus({
   }
 
   const lastSync = status?.lastSyncAt
-    ? new Date(status.lastSyncAt).toLocaleString()
-    : "Never";
+    ? new Date(status.lastSyncAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : null;
+
+  const isProcessing = status?.isProcessing;
 
   return (
-    <div className="sync-widget">
-      <div className={`sync-dot ${status?.isProcessing ? "is-busy" : ""}`} />
-      <div className="sync-copy">
-        <strong>{status?.isProcessing ? "Syncing your listening graph" : "Cluster pipeline"}</strong>
-        <span>
-          {status?.isProcessing
-            ? "We are fetching history, filtering skips, and rebuilding clusters."
-            : `Last sync: ${lastSync}${status?.clusterCount ? ` | ${status.clusterCount} clusters` : ""}`}
+    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+      {/* Status indicator */}
+      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        <span
+          style={{
+            display: "inline-block",
+            width: "7px",
+            height: "7px",
+            borderRadius: "50%",
+            background: isProcessing ? "#F59E0B" : lastSync ? "#1DB954" : "#475569",
+            boxShadow: isProcessing
+              ? "0 0 0 3px rgba(245,158,11,0.2)"
+              : lastSync
+              ? "0 0 0 3px rgba(29,185,84,0.15)"
+              : "none",
+            animation: isProcessing ? "sync-pulse 1.4s ease-in-out infinite" : "none",
+          }}
+        />
+        <span style={{ fontSize: "13px", color: "var(--text-3)" }}>
+          {isProcessing
+            ? "Syncing…"
+            : lastSync
+            ? `Synced ${lastSync}`
+            : "Not synced"}
         </span>
       </div>
+
       <button
         type="button"
-        className="sync-button"
         onClick={handleSync}
-        disabled={status?.isProcessing || !userId}
+        disabled={isProcessing || !userId}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "6px",
+          padding: "7px 14px",
+          background: isProcessing ? "var(--surface)" : "var(--surface-2)",
+          border: "1px solid var(--border)",
+          borderRadius: "99px",
+          fontFamily: "inherit",
+          fontSize: "13px",
+          fontWeight: "600",
+          color: isProcessing ? "var(--text-3)" : "var(--text-2)",
+          cursor: isProcessing || !userId ? "not-allowed" : "pointer",
+          opacity: isProcessing || !userId ? 0.5 : 1,
+          transition: "background 150ms, color 150ms, border-color 150ms",
+          letterSpacing: "-0.01em",
+        }}
+        onMouseOver={(e) => {
+          if (!isProcessing && userId) {
+            e.currentTarget.style.borderColor = "var(--border-2)";
+            e.currentTarget.style.color = "var(--text)";
+          }
+        }}
+        onMouseOut={(e) => {
+          e.currentTarget.style.borderColor = "var(--border)";
+          e.currentTarget.style.color = isProcessing ? "var(--text-3)" : "var(--text-2)";
+        }}
       >
-        {status?.isProcessing ? "Syncing" : "Sync now"}
+        {isProcessing ? (
+          <>
+            <span style={{
+              display: "inline-block",
+              width: "11px",
+              height: "11px",
+              border: "2px solid rgba(255,255,255,0.2)",
+              borderTopColor: "var(--text-2)",
+              borderRadius: "50%",
+              animation: "spin 0.7s linear infinite",
+            }} />
+            Syncing
+          </>
+        ) : "Sync now"}
       </button>
+
+      <style>{`
+        @keyframes sync-pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50%       { opacity: 0.5; transform: scale(0.8); }
+        }
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
