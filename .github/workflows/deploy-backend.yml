@@ -41,9 +41,12 @@ jobs:
           SPOTIFY_CLIENT_ID:     ${{ secrets.SPOTIFY_CLIENT_ID }}
           SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
           SPOTIFY_REDIRECT_URI:  ${{ secrets.SPOTIFY_REDIRECT_URI }}
+          FRONTEND_URL:          ${{ secrets.FRONTEND_URL }}
           OPENWEATHER_API_KEY:   ${{ secrets.OPENWEATHER_API_KEY }}
           OPENAI_API_KEY:        ${{ secrets.OPENAI_API_KEY }}
           ML_LAMBDA_ARN:         ${{ secrets.ML_LAMBDA_ARN }}
+          SYNC_LAMBDA_ARN:       ${{ secrets.SYNC_LAMBDA_ARN }}
+          KMS_KEY_ARN:           ${{ secrets.KMS_KEY_ARN }}
         run: npx serverless deploy --stage dev
         working-directory: backend
 
