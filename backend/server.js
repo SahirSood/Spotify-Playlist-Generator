@@ -347,20 +347,12 @@ app.post('/sync-and-cluster', async (req, res) => {
     await setProcessing(user_id, true);
 
     const syncArn = process.env.SYNC_LAMBDA_ARN || null;
-    const mlArn = process.env.ML_LAMBDA_ARN || null;
 
     if (syncArn) {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: syncArn,
         InvocationType: 'Event',
-        Payload: JSON.stringify({ userId: user_id }),
-      }));
-    }
-    if (mlArn) {
-      await lambdaClient.send(new InvokeCommand({
-        FunctionName: mlArn,
-        InvocationType: 'Event',
-        Payload: JSON.stringify({ action: 'run_clustering', userId: user_id }),
+        Payload: JSON.stringify({ userId: user_id, runClustering: true }),
       }));
     }
 

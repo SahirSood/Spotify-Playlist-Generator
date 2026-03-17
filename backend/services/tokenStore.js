@@ -85,8 +85,8 @@ async function updateSyncCursor(userId, cursor) {
   await updateItem(
     TABLE,
     { userId },
-    'SET lastSyncCursor = :cursor, lastSyncAt = :now, isProcessing = :false',
-    { ':cursor': cursor, ':now': new Date().toISOString(), ':false': false }
+    'SET lastSyncCursor = :cursor, lastSyncAt = :now',
+    { ':cursor': cursor, ':now': new Date().toISOString() }
   );
 }
 
