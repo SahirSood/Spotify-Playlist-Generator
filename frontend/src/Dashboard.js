@@ -27,8 +27,35 @@ function Dashboard() {
     const [showClusters, setShowClusters] = useState(false);
     const [generatePrefill, setGeneratePrefill] = useState('');
 
+    const handleLogout = useCallback(() => {
+        // Clear tokens from state
+        setAccessToken('');
+        setRefreshToken('');
+        
+        // Clear tokens from localStorage
+        localStorage.removeItem('spotify_access_token');
+        localStorage.removeItem('spotify_refresh_token');
+        
+        // Clear other state
+        setPlaylists([]);
+        setLikedSongs([]);
+        setShowSidebar(false);
+        setSelectedPlaylistName('');
+        setNextLikedSongsUrl('');
+        setNextPlaylistSongsUrl('');
+        setListeningData(null);
+        setShowAnalytics(false);
+        setClusters([]);
+        setSyncStatus(null);
+        setShowClusters(false);
+        setShowGenerateModal(false);
+
+        // Redirect to home page
+        navigate('/');
+    }, [navigate]);
+
     // Function to refresh access token
-    const refreshAccessToken = async () => {
+    const refreshAccessToken = useCallback(async () => {
         if (!refreshToken) {
             console.error('No refresh token available');
             handleLogout();
@@ -63,10 +90,10 @@ function Dashboard() {
             handleLogout(); // Force re-login if refresh fails
             return null;
         }
-    };
+    }, [refreshToken, handleLogout]);
 
     // Enhanced fetch function with automatic token refresh
-    const spotifyFetch = async (url, options = {}) => {
+    const spotifyFetch = useCallback(async (url, options = {}) => {
         let token = accessToken;
 
         // First attempt with current token
@@ -98,7 +125,7 @@ function Dashboard() {
         }
 
         return response;
-    };
+    }, [accessToken, refreshAccessToken]);
 
     // NEW: Function to fetch and analyze listening data
     const fetchListeningAnalytics = async () => {
@@ -195,7 +222,7 @@ function Dashboard() {
         };
 
         fetchPlaylists();
-    }, [accessToken, refreshToken]);
+    }, [accessToken, refreshToken, spotifyFetch]);
 
     // Fetch all liked songs (with pagination) - Updated with token refresh
     const fetchLikedSongs = async () => {
@@ -298,34 +325,6 @@ function Dashboard() {
                 loadMorePlaylistSongs();
             }
         }
-    };
-
-    // Add logout function
-    const handleLogout = () => {
-        // Clear tokens from state
-        setAccessToken('');
-        setRefreshToken('');
-        
-        // Clear tokens from localStorage
-        localStorage.removeItem('spotify_access_token');
-        localStorage.removeItem('spotify_refresh_token');
-        
-        // Clear other state
-        setPlaylists([]);
-        setLikedSongs([]);
-        setShowSidebar(false);
-        setSelectedPlaylistName('');
-        setNextLikedSongsUrl('');
-        setNextPlaylistSongsUrl('');
-        setListeningData(null);
-        setShowAnalytics(false);
-        setClusters([]);
-        setSyncStatus(null);
-        setShowClusters(false);
-        setShowGenerateModal(false);
-
-        // Redirect to home page
-        navigate('/');
     };
 
     return (
