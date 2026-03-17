@@ -23,7 +23,7 @@ function getPlaybackBadge(playback) {
   return { label: "Tracked", tone: "ok" };
 }
 
-function Dashboard() {
+function Dashboard({ theme, onToggleTheme }) {
   const navigate = useNavigate();
   const [accessToken, setAccessToken] = useState("");
   const [refreshToken, setRefreshToken] = useState("");
@@ -335,12 +335,21 @@ function Dashboard() {
       ? "Data is ready"
       : "Ready to sync";
 
+  const clusterSpotlight = clusters.slice(0, 3);
+
   return (
     <div className="dashboard-shell">
       <div className="dashboard-glow dashboard-glow-left" aria-hidden="true" />
       <div className="dashboard-glow dashboard-glow-right" aria-hidden="true" />
 
       <main className="dashboard-main">
+        <header className="site-topbar dashboard-topbar">
+          <div className="site-brand">Flowstate</div>
+          <button type="button" className="theme-toggle" onClick={onToggleTheme}>
+            {theme === "dark" ? "Light mode" : "Dark mode"}
+          </button>
+        </header>
+
         <section className="dashboard-hero">
           <div className="dashboard-hero-copy">
             <span className="dashboard-kicker">Taste Graph</span>
@@ -439,8 +448,79 @@ function Dashboard() {
               Your model groups music by how and when you listen, not just genre labels.
             </p>
             <div className="dashboard-cluster-preview">
-              <strong>{clusters.length}</strong>
-              <span>clusters detected</span>
+              <div className="cluster-preview-orbit">
+                <div className="cluster-preview-core">
+                  <strong>{clusters.length}</strong>
+                  <span>clusters detected</span>
+                </div>
+                <div className="cluster-preview-dot cluster-preview-dot-a" />
+                <div className="cluster-preview-dot cluster-preview-dot-b" />
+                <div className="cluster-preview-dot cluster-preview-dot-c" />
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section className="dashboard-feature-row">
+          <article className="dashboard-panel dashboard-panel-wide dashboard-generator-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <span className="dashboard-section-tag">Generator</span>
+                <h2>Prompt the mood, not the genre</h2>
+              </div>
+            </div>
+            <p className="dashboard-panel-copy">
+              Use your clusters like a personal creative engine. Ask for moments,
+              textures, weather, energy, or vibes and let the app build from your
+              own history.
+            </p>
+            <div className="dashboard-prompt-cloud">
+              {[
+                "late-night motion with polish",
+                "rainy walk but optimistic",
+                "gym songs that still feel stylish",
+                "soft focus coffee shop energy",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  className="dashboard-prompt-pill"
+                  onClick={() => {
+                    setGeneratePrefill(prompt);
+                    setShowGenerateModal(true);
+                  }}
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          </article>
+
+          <article className="dashboard-panel dashboard-cluster-stack-panel">
+            <div className="dashboard-panel-head">
+              <div>
+                <span className="dashboard-section-tag">Mood Map</span>
+                <h2>Cluster spotlight</h2>
+              </div>
+            </div>
+            <div className="dashboard-cluster-stack">
+              {clusterSpotlight.length > 0 ? (
+                clusterSpotlight.map((cluster, index) => (
+                  <button
+                    key={cluster.clusterId}
+                    type="button"
+                    className={`dashboard-cluster-tease dashboard-cluster-tease-${index + 1}`}
+                    onClick={() => setShowClusters(true)}
+                  >
+                    <strong>{cluster.clusterLabel}</strong>
+                    <span>{cluster.clusterDescription || `${cluster.trackCount || 0} songs`}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="dashboard-cluster-empty">
+                  Sync once and your first mood cards will appear here.
+                </div>
+              )}
             </div>
           </article>
         </section>

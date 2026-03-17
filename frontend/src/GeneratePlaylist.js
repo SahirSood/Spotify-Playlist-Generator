@@ -1,26 +1,19 @@
-import React, { useState } from 'react';
-import { generatePlaylist } from './api';
+import React, { useState } from "react";
+import { generatePlaylist } from "./api";
 
-const overlay = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
-};
-const modal = {
-  background: '#1e1e1e', borderRadius: '16px', padding: '32px',
-  width: '100%', maxWidth: '480px', color: '#fff',
-};
-const input = {
-  width: '100%', padding: '12px 16px', borderRadius: '8px',
-  border: '1px solid #444', background: '#111', color: '#fff',
-  fontSize: '15px', boxSizing: 'border-box', marginTop: '12px',
-};
-const btn = (color = '#1db954') => ({
-  padding: '10px 24px', borderRadius: '20px', border: 'none',
-  background: color, color: color === '#1db954' ? '#000' : '#fff',
-  fontWeight: '700', fontSize: '14px', cursor: 'pointer',
-});
+const SUGGESTIONS = [
+  "late-night polished drive",
+  "rainy walk with confidence",
+  "soft-focus morning reset",
+  "workout songs with style",
+];
 
-export default function GeneratePlaylist({ userId, accessToken, onClose, initialRequest = '' }) {
+export default function GeneratePlaylist({
+  userId,
+  accessToken,
+  onClose,
+  initialRequest = "",
+}) {
   const [request, setRequest] = useState(initialRequest);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -41,52 +34,85 @@ export default function GeneratePlaylist({ userId, accessToken, onClose, initial
   }
 
   return (
-    <div style={overlay} onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div style={modal}>
-        <h2 style={{ margin: '0 0 8px', fontSize: '20px' }}>Generate a Playlist</h2>
-        <p style={{ color: '#999', fontSize: '13px', margin: '0 0 16px' }}>
-          Describe the vibe — your listening history does the rest.
+    <div
+      className="modal-overlay"
+      onClick={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <div className="modal-shell">
+        <h2>Generate a playlist</h2>
+        <p className="modal-subtitle">
+          Describe the feeling you want. The app will match it to your listening
+          history and build from your own clusters.
         </p>
 
         {!result ? (
           <>
             <input
-              style={input}
-              placeholder='e.g. "late night mellow drive" or "hype gym session"'
+              className="modal-input"
+              placeholder='Try "clean-focus commute" or "expensive-feeling cardio"'
               value={request}
-              onChange={(e) => setRequest(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleGenerate()}
+              onChange={(event) => setRequest(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && handleGenerate()}
             />
-            {error && <p style={{ color: '#e74c3c', fontSize: '13px', marginTop: '8px' }}>{error}</p>}
-            <div style={{ display: 'flex', gap: '12px', marginTop: '20px' }}>
-              <button style={btn()} onClick={handleGenerate} disabled={loading || !request.trim()}>
-                {loading ? 'Analyzing…' : 'Create Playlist'}
-              </button>
-              <button style={btn('#444')} onClick={onClose}>Cancel</button>
+            <div className="modal-suggestions">
+              {SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  className="modal-suggestion"
+                  onClick={() => setRequest(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ))}
             </div>
+
+            {error && <p className="modal-error">{error}</p>}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="modal-primary"
+                onClick={handleGenerate}
+                disabled={loading || !request.trim()}
+              >
+                {loading ? "Generating" : "Create playlist"}
+              </button>
+              <button type="button" className="modal-secondary" onClick={onClose}>
+                Cancel
+              </button>
+            </div>
+            <p className="modal-note">
+              Best results come from describing a mood, moment, or energy level.
+            </p>
           </>
         ) : (
-          <div>
-            <div style={{ background: '#111', borderRadius: '10px', padding: '16px', marginBottom: '16px' }}>
-              <div style={{ fontSize: '12px', color: '#1db954', fontWeight: '700', marginBottom: '4px' }}>
-                {result.clusterLabel}
-              </div>
-              <div style={{ fontSize: '18px', fontWeight: '700' }}>{result.playlistName}</div>
-              <div style={{ fontSize: '13px', color: '#aaa', marginTop: '6px' }}>{result.rationale}</div>
-              <div style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
-                {result.trackCount} tracks added
-              </div>
+          <>
+            <div className="modal-result-card">
+              <span className="modal-result-label">{result.clusterLabel}</span>
+              <strong className="modal-result-title">{result.playlistName}</strong>
+              <p className="modal-result-rationale">{result.rationale}</p>
+              <span className="modal-result-meta">{result.trackCount} tracks added</span>
             </div>
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <a href={result.playlistUrl} target="_blank" rel="noreferrer">
-                <button style={btn()}>Open in Spotify</button>
+            <div className="modal-result-actions">
+              <a href={result.playlistUrl} target="_blank" rel="noreferrer" className="home-primary">
+                Open in Spotify
               </a>
-              <button style={btn('#444')} onClick={() => { setResult(null); setRequest(''); }}>
-                Generate Another
+              <button
+                type="button"
+                className="modal-tertiary"
+                onClick={() => {
+                  setResult(null);
+                  setRequest("");
+                }}
+              >
+                Generate another
               </button>
-              <button style={btn('#333')} onClick={onClose}>Close</button>
+              <button type="button" className="modal-secondary" onClick={onClose}>
+                Close
+              </button>
             </div>
-          </div>
+          </>
         )}
       </div>
     </div>
