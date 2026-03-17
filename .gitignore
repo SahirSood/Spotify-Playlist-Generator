@@ -3,8 +3,13 @@
 .env.*
 backend/.env
 frontend/.env
+backend-python/.env
+!.env.example
+!*.env.example
+!*.copy.example
 # dependencies
 /node_modules
+**/node_modules/
 /.pnp
 .pnp.js
 
@@ -13,6 +18,7 @@ frontend/.env
 
 # production
 /build
+**/.serverless/
 
 # misc
 .DS_Store
