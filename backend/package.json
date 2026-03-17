@@ -2,6 +2,9 @@
   "name": "backend",
   "version": "1.0.0",
   "main": "index.js",
+  "engines": {
+    "node": "18.x"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -14,7 +17,7 @@
     "@aws-sdk/client-kms": "^3.600.0",
     "@aws-sdk/client-lambda": "^3.600.0",
     "@aws-sdk/lib-dynamodb": "^3.600.0",
-    "aws-sdk": "^2.1692.0",
+    "aws-sdk": "^2.1693.0",
     "axios": "^1.11.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
@@ -23,6 +26,6 @@
     "serverless-http": "^3.2.0"
   },
   "devDependencies": {
-    "serverless-dotenv-plugin": "^6.0.0"
+    "serverless-dotenv-plugin": "^3.9.1"
   }
 }
