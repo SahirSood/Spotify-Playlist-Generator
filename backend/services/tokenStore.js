@@ -3,6 +3,7 @@
  * Uses AWS KMS envelope encryption before writing to DynamoDB UserMeta table.
  * Falls back to plaintext if KMS_KEY_ARN is not set (local dev only).
  */
+const crypto = require('crypto');
 const { KMSClient, GenerateDataKeyCommand, DecryptCommand } = require('@aws-sdk/client-kms');
 const { getItem, putItem, updateItem } = require('./dynamodb');
 
@@ -16,20 +17,18 @@ async function encrypt(plaintext) {
     KeyId: KMS_KEY_ARN,
     KeySpec: 'AES_256',
   }));
-  const dataKey = result.Plaintext;
+  const dataKey = Buffer.from(result.Plaintext);
   const encryptedKey = Buffer.from(result.CiphertextBlob).toString('base64');
-
-  // Simple XOR encryption with the data key (production: use AES-256-GCM)
-  const buf = Buffer.from(plaintext, 'utf8');
-  const encrypted = Buffer.alloc(buf.length);
-  for (let i = 0; i < buf.length; i++) {
-    encrypted[i] = buf[i] ^ dataKey[i % dataKey.length];
-  }
-  // Overwrite the plaintext key from memory
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', dataKey, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
   dataKey.fill(0);
 
   return JSON.stringify({
     encryptedKey,
+    iv: iv.toString('base64'),
+    authTag: authTag.toString('base64'),
     encryptedValue: encrypted.toString('base64'),
   });
 }
@@ -42,16 +41,15 @@ async function decrypt(ciphertext) {
   } catch {
     return ciphertext; // already plaintext (migration path)
   }
-  const { encryptedKey, encryptedValue } = parsed;
+  const { encryptedKey, encryptedValue, iv, authTag } = parsed;
   const result = await kmsClient.send(new DecryptCommand({
     CiphertextBlob: Buffer.from(encryptedKey, 'base64'),
   }));
-  const dataKey = result.Plaintext;
+  const dataKey = Buffer.from(result.Plaintext);
   const encrypted = Buffer.from(encryptedValue, 'base64');
-  const decrypted = Buffer.alloc(encrypted.length);
-  for (let i = 0; i < encrypted.length; i++) {
-    decrypted[i] = encrypted[i] ^ dataKey[i % dataKey.length];
-  }
+  const decipher = crypto.createDecipheriv('aes-256-gcm', dataKey, Buffer.from(iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(authTag, 'base64'));
+  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   dataKey.fill(0);
   return decrypted.toString('utf8');
 }
