@@ -1,74 +1,176 @@
-## Note ## 
-Lack of Git commit history due to a API key error so needed to revert commits to fix leak
+# Spotify Playlist Generator
 
+A full-stack Spotify app that:
 
-# Getting Started with Create React App
+- lets a user sign in with Spotify
+- explores playlists and liked songs in the frontend
+- stores listening history in DynamoDB
+- clusters listening behavior with a Python Lambda
+- uses OpenAI to label clusters and match playlist requests to a cluster
+- creates a Spotify playlist from a natural-language prompt
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## Project Structure
 
-## Available Scripts
+- `frontend/`: React app hosted locally or on Amplify
+- `backend/`: Node/Express API deployed to AWS Lambda + API Gateway
+- `backend-python/`: Python ML Lambda for feature extraction, clustering, and cluster matching
 
-In the project directory, you can run:
+## What You Need
 
-### `npm start`
+- AWS account
+- Spotify Developer app
+- OpenAI API key
+- OpenWeather API key if you want weather enrichment
+- Node.js 18+
+- Python 3.11
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## Environment Files
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Copy each example file and fill in the values:
 
-### `npm test`
+- `frontend/.env.example` -> `frontend/.env`
+- `backend/.env.example` -> `backend/.env`
+- `backend-python/.env.example` -> `backend-python/.env`
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+### Frontend
 
-### `npm run build`
+`frontend/.env`
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+```env
+REACT_APP_API_URL=http://localhost:5000
+```
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+### Backend
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+`backend/.env`
 
-### `npm run eject`
+```env
+SPOTIFY_CLIENT_ID=your_spotify_client_id
+SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+SPOTIFY_REDIRECT_URI=http://localhost:5000/callback
+FRONTEND_URL=http://localhost:3000
+OPENWEATHER_API_KEY=optional_openweather_key
+OPENAI_API_KEY=your_openai_api_key
+ML_LAMBDA_ARN=
+SYNC_LAMBDA_ARN=
+KMS_KEY_ARN=
+DYNAMODB_REGION=us-east-1
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+Notes:
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+- `FRONTEND_URL` is where users should land after Spotify login
+- `SPOTIFY_REDIRECT_URI` must exactly match a redirect URI in your Spotify app settings
+- `KMS_KEY_ARN` is recommended for production token encryption
+- `ML_LAMBDA_ARN` and `SYNC_LAMBDA_ARN` are needed for full background sync + playlist generation flows in AWS
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+### Python ML Backend
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+`backend-python/.env`
 
-## Learn More
+```env
+OPENAI_API_KEY=your_openai_api_key
+DYNAMODB_REGION=us-east-1
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## Local Development
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+### 1. Frontend
 
-### Code Splitting
+```bash
+cd frontend
+npm install
+npm start
+```
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+Runs on `http://localhost:3000`.
 
-### Analyzing the Bundle Size
+### 2. Node Backend
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+```bash
+cd backend
+npm install
+node server.js
+```
 
-### Making a Progressive Web App
+Runs on `http://localhost:5000`.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+### 3. Python Backend
 
-### Advanced Configuration
+The Python Lambda is designed for AWS deployment. It is not fully wired for a nice local dev workflow yet because it depends on DynamoDB data and Lambda packaging.
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+## AWS Deployment
 
-### Deployment
+### Frontend
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
+The repo includes `amplify.yml` for deploying the React app from `frontend/`.
 
-### `npm run build` fails to minify
+Set the Amplify environment variable:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+- `REACT_APP_API_URL`: your deployed backend API URL
+
+### Node Backend
+
+Deploys with Serverless from `backend/serverless.yml`.
+
+Creates:
+
+- API Gateway + Lambda for the Express app
+- a scheduled Lambda for listening sync
+- DynamoDB tables for listening events, features, clusters, generated playlists, and user metadata
+
+Important environment variables for deploy:
+
+- `SPOTIFY_CLIENT_ID`
+- `SPOTIFY_CLIENT_SECRET`
+- `SPOTIFY_REDIRECT_URI`
+- `FRONTEND_URL`
+- `OPENAI_API_KEY`
+- `OPENWEATHER_API_KEY`
+- `KMS_KEY_ARN`
+- `ML_LAMBDA_ARN`
+- `SYNC_LAMBDA_ARN`
+
+### Python Backend
+
+Deploys with Serverless from `backend-python/serverless.yml`.
+
+Important:
+
+- it requires a Lambda layer zip at `backend-python/layers/sklearn-layer.zip`
+- the GitHub Actions workflow builds that layer during deployment
+
+## GitHub Actions Secrets
+
+If you use the included workflow, set these repository secrets:
+
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_REGION`
+- `SPOTIFY_CLIENT_ID`
+- `SPOTIFY_CLIENT_SECRET`
+- `SPOTIFY_REDIRECT_URI`
+- `FRONTEND_URL`
+- `OPENWEATHER_API_KEY`
+- `OPENAI_API_KEY`
+- `ML_LAMBDA_ARN`
+- `SYNC_LAMBDA_ARN`
+- `KMS_KEY_ARN`
+
+## Current Limitations
+
+- local automated verification has not been completed
+- the Python Lambda packaging is AWS-first, not local-first
+- OpenWeather enrichment is optional
+- the first deployment is easiest to do manually before relying on GitHub Actions for continuous deploys
+
+## Suggested First Launch Order
+
+1. Create the Spotify app and set redirect URIs.
+2. Create the OpenAI API key.
+3. Fill in local `.env` files.
+4. Deploy the Node backend.
+5. Deploy the Python backend.
+6. Copy the deployed API URL into Amplify as `REACT_APP_API_URL`.
+7. Update Spotify redirect URIs for the production backend callback.
+8. Test login, sync, clustering, and playlist generation with your own Spotify account.
