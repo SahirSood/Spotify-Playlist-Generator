@@ -55,6 +55,8 @@ def build_feature_matrix(listening_events, song_features_map):
     meta = []
 
     for event in listening_events:
+        if not event.get('includeInMl', True):
+            continue
         track_id = event.get('trackId')
         features = song_features_map.get(track_id)
         if not features:
@@ -68,6 +70,7 @@ def build_feature_matrix(listening_events, song_features_map):
             'artistNames': event.get('artistNames', ''),
             'userId': event.get('userId', ''),
             'sessionId': event.get('sessionId', ''),
+            'sessionPosition': event.get('sessionPosition', 0),
             'playedAt': event.get('playedAt', ''),
             'timeOfDay': event.get('timeOfDay', ''),
             'weatherCondition': event.get('weatherCondition', 'Unknown'),

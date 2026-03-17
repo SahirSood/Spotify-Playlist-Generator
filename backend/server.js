@@ -4,6 +4,7 @@ const querystring = require('querystring');
 const axios = require('axios');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 require('dotenv').config();
+const { annotateChronologicalTracks } = require('./services/playbackHeuristics');
 
 const lambdaClient = new LambdaClient({ region: process.env.DYNAMODB_REGION || 'us-east-1' });
 const { getItem, putItem, queryItems } = require('./services/dynamodb');
@@ -203,11 +204,11 @@ app.get('/log-listening', async (req, res) => {
       { headers: { Authorization: `Bearer ${access_token}` } }
     );
     
-    const tracks = recentlyPlayed.data.items;
+    const tracks = annotateChronologicalTracks([...recentlyPlayed.data.items].reverse()).reverse();
     console.log(`📊 Found ${tracks.length} recently played tracks`);
 
     // Process tracks with ALL available data (except audio features)
-    const processed = tracks.map(({ track, played_at }, index) => ({
+    const processed = tracks.map(({ track, played_at, playbackHeuristics }, index) => ({
       index: index + 1,
       trackId: track.id,
       trackName: track.name,
@@ -227,6 +228,14 @@ app.get('/log-listening', async (req, res) => {
       external_urls: track.external_urls,
       timestamp: played_at,
       timeOfDay: getTimeOfDay(new Date(played_at)),
+      playback: {
+        estimated_listen_ms: playbackHeuristics?.listenWindowMs,
+        estimated_completion_ratio: playbackHeuristics?.estimatedCompletionRatio,
+        is_skipped: playbackHeuristics?.isSkipped || false,
+        is_spam: playbackHeuristics?.isSpam || false,
+        include_in_ml: playbackHeuristics?.includeInMl !== false,
+        skip_reason: playbackHeuristics?.skipReason || null
+      },
       // Add some derived insights instead of audio features
       insights: {
         isPopular: track.popularity > 70,
@@ -245,6 +254,8 @@ app.get('/log-listening', async (req, res) => {
       data: processed,
       summary: {
         totalTracks: processed.length,
+        skippedTracks: processed.filter(t => t.playback.is_skipped).length,
+        spamTracks: processed.filter(t => t.playback.is_spam).length,
         uniqueArtists: [...new Set(processed.map(t => t.artist))].length,
         timeRange: {
           earliest: processed[processed.length - 1]?.timestamp,
@@ -275,7 +286,7 @@ app.post('/log-listening', async (req, res) => {
       headers: { 'Authorization': `Bearer ${access_token}` }
     });
 
-    const recentTracks = recentlyPlayedResponse.data.items;
+    const recentTracks = annotateChronologicalTracks([...recentlyPlayedResponse.data.items].reverse()).reverse();
     console.log(`📊 Found ${recentTracks.length} recently played tracks`);
 
     const processedTracks = recentTracks.map((item, index) => ({
@@ -289,6 +300,14 @@ app.post('/log-listening', async (req, res) => {
       popularity: item.track.popularity,
       timestamp: item.played_at,
       timeOfDay: getTimeOfDay(new Date(item.played_at)),
+      playback: {
+        estimated_listen_ms: item.playbackHeuristics?.listenWindowMs,
+        estimated_completion_ratio: item.playbackHeuristics?.estimatedCompletionRatio,
+        is_skipped: item.playbackHeuristics?.isSkipped || false,
+        is_spam: item.playbackHeuristics?.isSpam || false,
+        include_in_ml: item.playbackHeuristics?.includeInMl !== false,
+        skip_reason: item.playbackHeuristics?.skipReason || null
+      },
       insights: {
         isPopular: item.track.popularity > 70,
         hasPreview: !!item.track.preview_url

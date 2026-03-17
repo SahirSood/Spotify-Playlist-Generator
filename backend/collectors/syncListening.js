@@ -8,6 +8,7 @@
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { putItem, getItem, scanItems } = require('../services/dynamodb');
 const { getUserTokens, updateSyncCursor, setProcessing } = require('../services/tokenStore');
+const { annotateChronologicalTracks } = require('../services/playbackHeuristics');
 
 const lambdaClient = new LambdaClient({ region: process.env.DYNAMODB_REGION || 'us-east-1' });
 const SESSION_GAP_MS = 30 * 60 * 1000; // 30 minutes
@@ -64,6 +65,7 @@ async function syncUser(userId) {
 
   // Tracks come newest-first from Spotify; reverse to process chronologically
   tracks.reverse();
+  tracks = annotateChronologicalTracks(tracks);
 
   // Enrich with artist genres (batch by unique artist IDs)
   const allArtistIds = [...new Set(tracks.flatMap((t) => t.track.artists.map((a) => a.id)))];
@@ -78,7 +80,7 @@ async function syncUser(userId) {
   // Write each track to DynamoDB
   const newTrackIds = new Set();
   for (const t of tracksWithSessions) {
-    const { track, played_at, sessionId } = t;
+    const { track, played_at, sessionId, sessionPosition, playbackHeuristics } = t;
     const artistIds = track.artists.map((a) => a.id);
     const artistGenres = [...new Set(artistIds.flatMap((id) => genreMap[id] || []))];
     const item = {
@@ -96,6 +98,13 @@ async function syncUser(userId) {
       explicit: track.explicit,
       timeOfDay: getTimeOfDay(new Date(played_at)),
       sessionId,
+      sessionPosition,
+      estimatedListenMs: playbackHeuristics?.listenWindowMs,
+      estimatedCompletionRatio: playbackHeuristics?.estimatedCompletionRatio,
+      isSkipped: playbackHeuristics?.isSkipped || false,
+      isSpam: playbackHeuristics?.isSpam || false,
+      includeInMl: playbackHeuristics?.includeInMl !== false,
+      skipReason: playbackHeuristics?.skipReason || null,
       weatherCondition: weather?.condition || 'Unknown',
       weatherTempC: weather?.tempC || 0,
       syncedAt: new Date().toISOString(),
@@ -106,7 +115,7 @@ async function syncUser(userId) {
 
   // Async-invoke Python ML Lambda to classify any new songs not yet in SongFeatures
   const uniqueNewTracks = tracksWithSessions
-    .filter((t) => newTrackIds.has(t.track.id))
+    .filter((t) => t.playbackHeuristics?.includeInMl && newTrackIds.has(t.track.id))
     .reduce((acc, t) => {
       if (!acc.find((x) => x.id === t.track.id)) acc.push(t.track);
       return acc;
@@ -118,7 +127,12 @@ async function syncUser(userId) {
   const latestPlayedAt = tracksWithSessions[tracksWithSessions.length - 1].played_at;
   await updateSyncCursor(userId, latestPlayedAt);
 
-  return { synced: tracks.length };
+  return {
+    synced: tracks.length,
+    mlEligible: tracksWithSessions.filter((t) => t.playbackHeuristics?.includeInMl).length,
+    skipped: tracksWithSessions.filter((t) => t.playbackHeuristics?.isSkipped).length,
+    spam: tracksWithSessions.filter((t) => t.playbackHeuristics?.isSpam).length,
+  };
 }
 
 // ── Spotify API helpers ────────────────────────────────────────────────────────
@@ -210,13 +224,23 @@ async function fetchWeather(lat, lon) {
 function computeSessionIds(userId, tracks) {
   // tracks are in chronological order (oldest first after reversing Spotify's newest-first)
   let counter = 0;
+  let sessionPosition = 0;
   return tracks.map((t, i) => {
     if (i > 0) {
       const prevMs = new Date(tracks[i - 1].played_at).getTime();
       const currMs = new Date(t.played_at).getTime();
-      if (currMs - prevMs > SESSION_GAP_MS) counter++;
+      if (currMs - prevMs > SESSION_GAP_MS) {
+        counter++;
+        sessionPosition = 0;
+      } else {
+        sessionPosition++;
+      }
     }
-    return { ...t, sessionId: `${userId}_s${counter}` };
+    return {
+      ...t,
+      sessionId: `${userId}_s${counter}`,
+      sessionPosition,
+    };
   });
 }
 
