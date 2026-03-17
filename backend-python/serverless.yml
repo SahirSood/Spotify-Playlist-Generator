@@ -6,8 +6,6 @@ provider:
   region: us-east-1
   timeout: 900
   memorySize: 3008
-  deploymentBucket:
-    name: spotify-playlist-api-deploy-bucket
   environment:
     OPENAI_API_KEY:  ${env:OPENAI_API_KEY}
     DYNAMODB_REGION: us-east-1
