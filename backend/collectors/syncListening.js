@@ -2,7 +2,7 @@
  * syncListening.js
  * AWS Lambda handler triggered by EventBridge every 30 minutes.
  * Fetches recently played tracks from Spotify for all registered users,
- * enriches with weather and artist genres, detects listening sessions,
+ * enriches with historical weather and artist genres, detects listening sessions,
  * writes to DynamoDB ListeningEvents, and triggers song feature extraction.
  */
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
@@ -76,13 +76,19 @@ async function syncUser(userId, { waitForFeatureExtraction = false } = {}) {
   const genreMap = await fetchArtistGenres(allArtistIds, accessToken);
 
   const tracksWithSessions = computeSessionIds(userId, tracks);
-  const weather = await fetchWeather(locationLat || 49.25, locationLon || -123.1);
+  const weatherCache = new Map();
 
   const newTrackIds = new Set();
   for (const item of tracksWithSessions) {
     const { track, played_at, sessionId, sessionPosition, playbackHeuristics } = item;
     const artistIds = track.artists.map((artist) => artist.id);
     const artistGenres = [...new Set(artistIds.flatMap((id) => genreMap[id] || []))];
+    const weather = await fetchHistoricalWeather(
+      locationLat || 49.25,
+      locationLon || -123.1,
+      played_at,
+      weatherCache
+    );
     await putItem('ListeningEvents', {
       userId,
       playedAt: played_at,
@@ -197,9 +203,14 @@ async function fetchArtistGenres(artistIds, accessToken) {
   return genreMap;
 }
 
-async function fetchWeather(lat, lon) {
+function getWeatherHourKey(playedAt) {
+  return new Date(playedAt).toISOString().slice(0, 13);
+}
+
+async function fetchCurrentWeather(lat, lon) {
   const apiKey = process.env.OPENWEATHER_API_KEY;
   if (!apiKey) return null;
+
   try {
     const res = await fetch(
       `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric`
@@ -212,6 +223,43 @@ async function fetchWeather(lat, lon) {
     };
   } catch {
     return null;
+  }
+}
+
+async function fetchHistoricalWeather(lat, lon, playedAt, cache = new Map()) {
+  const apiKey = process.env.OPENWEATHER_API_KEY;
+  if (!apiKey) return null;
+
+  const cacheKey = getWeatherHourKey(playedAt);
+  if (cache.has(cacheKey)) {
+    return cache.get(cacheKey);
+  }
+
+  const fallback = await fetchCurrentWeather(lat, lon);
+
+  try {
+    const unixSeconds = Math.floor(new Date(playedAt).getTime() / 1000);
+    const res = await fetch(
+      `https://api.openweathermap.org/data/3.0/onecall/timemachine?lat=${lat}&lon=${lon}&dt=${unixSeconds}&appid=${apiKey}&units=metric`
+    );
+
+    if (!res.ok) {
+      cache.set(cacheKey, fallback);
+      return fallback;
+    }
+
+    const data = await res.json();
+    const source = Array.isArray(data?.data) ? data.data[0] : data?.current;
+    const weather = {
+      condition: source?.weather?.[0]?.main || fallback?.condition || 'Unknown',
+      tempC: Math.round(source?.temp ?? fallback?.tempC ?? 0),
+    };
+
+    cache.set(cacheKey, weather);
+    return weather;
+  } catch {
+    cache.set(cacheKey, fallback);
+    return fallback;
   }
 }
 
