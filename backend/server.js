@@ -9,6 +9,7 @@ const { annotateChronologicalTracks } = require('./services/playbackHeuristics')
 const lambdaClient = new LambdaClient({ region: process.env.DYNAMODB_REGION || 'us-east-1' });
 const { getItem, putItem, queryItems } = require('./services/dynamodb');
 const { saveUserTokens, setProcessing } = require('./services/tokenStore');
+const localState = require('./services/localState');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -16,11 +17,11 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Spotify OAuth endpoints
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'http://localhost:5000/callback';
+const LOCAL_SYNC_MODE = !process.env.SYNC_LAMBDA_ARN || !process.env.ML_LAMBDA_ARN;
 
 function parseCookies(cookieHeader = '') {
   return cookieHeader
@@ -66,6 +67,212 @@ function generateRandomString(length) {
   return text;
 }
 
+function formatDuration(ms) {
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+function getTimeOfDay(date) {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 12) return 'morning';
+  if (hour >= 12 && hour < 17) return 'afternoon';
+  if (hour >= 17 && hour < 21) return 'evening';
+  return 'night';
+}
+
+async function fetchSpotifyProfile(accessToken) {
+  const response = await axios.get('https://api.spotify.com/v1/me', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return response.data;
+}
+
+async function fetchRecentTracks(accessToken, limit = 30) {
+  const response = await axios.get(
+    `https://api.spotify.com/v1/me/player/recently-played?limit=${limit}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  const seen = new Set();
+  return response.data.items
+    .map((item) => item.track)
+    .filter((track) => track?.id)
+    .filter((track) => {
+      if (seen.has(track.id)) return false;
+      seen.add(track.id);
+      return true;
+    });
+}
+
+async function fetchLikedTracks(accessToken, limit = 30) {
+  const response = await axios.get(
+    `https://api.spotify.com/v1/me/tracks?limit=${limit}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+
+  const seen = new Set();
+  return response.data.items
+    .map((item) => item.track)
+    .filter((track) => track?.id)
+    .filter((track) => {
+      if (seen.has(track.id)) return false;
+      seen.add(track.id);
+      return true;
+    });
+}
+
+function dedupeTracks(tracks) {
+  const seen = new Set();
+  return tracks.filter((track) => {
+    if (!track?.id || seen.has(track.id)) return false;
+    seen.add(track.id);
+    return true;
+  });
+}
+
+async function buildLocalClusters(accessToken) {
+  const [recentTracks, likedTracks] = await Promise.all([
+    fetchRecentTracks(accessToken, 30),
+    fetchLikedTracks(accessToken, 30),
+  ]);
+
+  const recentClusterTracks = dedupeTracks(recentTracks).slice(0, 30);
+  const likedClusterTracks = dedupeTracks(
+    likedTracks.filter((track) => !recentClusterTracks.some((recent) => recent.id === track.id))
+  ).slice(0, 30);
+
+  const clusters = [];
+  if (recentClusterTracks.length) {
+    clusters.push({
+      clusterId: 'local_recent_rotation',
+      clusterLabel: 'Recent Rotation',
+      clusterDescription: 'Freshly played tracks from your current listening cycle.',
+      trackIds: recentClusterTracks.map((track) => track.id),
+      trackCount: recentClusterTracks.length,
+      dominantTimeOfDay: 'mixed',
+      dominantWeather: 'Unknown',
+      avgEnergy: 0.6,
+      avgValence: 0.5,
+    });
+  }
+
+  if (likedClusterTracks.length) {
+    clusters.push({
+      clusterId: 'local_liked_favorites',
+      clusterLabel: 'Liked Favorites',
+      clusterDescription: 'Saved tracks pulled from your liked songs library.',
+      trackIds: likedClusterTracks.map((track) => track.id),
+      trackCount: likedClusterTracks.length,
+      dominantTimeOfDay: 'mixed',
+      dominantWeather: 'Unknown',
+      avgEnergy: 0.55,
+      avgValence: 0.55,
+    });
+  }
+
+  return clusters;
+}
+
+async function chooseLocalTracksWithOpenAI({ accessToken, userRequest, clusters }) {
+  const candidateIds = [...new Set(clusters.flatMap((cluster) => cluster.trackIds || []))].slice(0, 40);
+  if (!candidateIds.length) {
+    return {
+      trackIds: [],
+      rationale: 'No local candidate tracks were available yet.',
+      clusterLabel: clusters[0]?.clusterLabel || 'Local Mix',
+    };
+  }
+
+  const trackResponse = await axios.get(`https://api.spotify.com/v1/tracks?ids=${candidateIds.join(',')}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const candidates = (trackResponse.data.tracks || [])
+    .filter(Boolean)
+    .map((track) => ({
+      id: track.id,
+      name: track.name,
+      artists: track.artists.map((artist) => artist.name).join(', '),
+      album: track.album?.name || '',
+      popularity: track.popularity || 0,
+    }));
+
+  const prompt = {
+    request: userRequest,
+    instruction: 'Pick 15 to 25 tracks that best fit the request. Use only provided ids.',
+    candidates,
+  };
+
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        temperature: 0.4,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a music curator. Respond with valid JSON only.',
+          },
+          {
+            role: 'user',
+            content: JSON.stringify(prompt),
+          },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const parsed = JSON.parse(response.data.choices[0].message.content);
+    const chosenIds = (parsed.trackIds || []).filter((id) => candidateIds.includes(id)).slice(0, 25);
+    return {
+      trackIds: chosenIds.length ? chosenIds : candidateIds.slice(0, 20),
+      rationale: parsed.rationale || 'Picked from your recent and liked tracks to match the requested vibe.',
+      clusterLabel: parsed.clusterLabel || clusters[0]?.clusterLabel || 'Local Mix',
+    };
+  } catch (error) {
+    console.error('local playlist selection error:', error.response?.data || error.message);
+    return {
+      trackIds: candidateIds.slice(0, 20),
+      rationale: 'Using a fallback selection from your recent and liked tracks.',
+      clusterLabel: clusters[0]?.clusterLabel || 'Local Mix',
+    };
+  }
+}
+
+async function createSpotifyPlaylist({ accessToken, playlistName, description, trackIds }) {
+  const profile = await fetchSpotifyProfile(accessToken);
+  const createResponse = await axios.post(
+    `https://api.spotify.com/v1/users/${profile.id}/playlists`,
+    { name: playlistName, description, public: false },
+    { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+  );
+
+  const playlistId = createResponse.data.id;
+  const playlistUrl = createResponse.data.external_urls?.spotify;
+  const trackUris = trackIds.map((id) => `spotify:track:${id}`);
+
+  if (trackUris.length) {
+    await axios.post(
+      `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
+      { uris: trackUris },
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+  }
+
+  return {
+    playlistId,
+    playlistUrl,
+    trackCount: trackUris.length,
+  };
+}
+
 // Login route - redirects to Spotify
 app.get('/login', (req, res) => {
   const state = generateRandomString(16);
@@ -82,7 +289,6 @@ app.get('/login', (req, res) => {
     }));
 });
 
-// Callback route - handles Spotify's response
 app.get('/callback', async (req, res) => {
   const code = req.query.code || null;
   const state = req.query.state || null;
@@ -128,7 +334,6 @@ app.get('/callback', async (req, res) => {
   }
 });
 
-// Token refresh endpoint
 app.post('/refresh', async (req, res) => {
   const { refresh_token } = req.body;
 
@@ -164,7 +369,6 @@ app.post('/refresh', async (req, res) => {
   }
 });
 
-// GET version without audio features
 app.get('/log-listening', async (req, res) => {
   const { access_token } = req.query;
 
@@ -212,7 +416,6 @@ app.get('/log-listening', async (req, res) => {
         include_in_ml: playbackHeuristics?.includeInMl !== false,
         skip_reason: playbackHeuristics?.skipReason || null,
       },
-      // Add derived insights instead of Spotify audio features.
       insights: {
         isPopular: track.popularity > 70,
         isRecent: new Date(track.album.release_date) > new Date('2020-01-01'),
@@ -248,7 +451,6 @@ app.get('/log-listening', async (req, res) => {
   }
 });
 
-// POST version without audio features
 app.post('/log-listening', async (req, res) => {
   const { access_token } = req.body;
 
@@ -306,27 +508,21 @@ app.post('/log-listening', async (req, res) => {
   }
 });
 
-function formatDuration(ms) {
-  const minutes = Math.floor(ms / 60000);
-  const seconds = Math.floor((ms % 60000) / 1000);
-  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
-function getTimeOfDay(date) {
-  const hour = date.getHours();
-  if (hour >= 5 && hour < 12) return 'morning';
-  if (hour >= 12 && hour < 17) return 'afternoon';
-  if (hour >= 17 && hour < 21) return 'evening';
-  return 'night';
-}
-
-// POST /save-tokens - store tokens after OAuth for background sync
 app.post('/save-tokens', async (req, res) => {
   const { user_id, access_token, refresh_token } = req.body;
   if (!user_id || !access_token || !refresh_token) {
     return res.status(400).json({ error: 'user_id, access_token and refresh_token are required' });
   }
+
   try {
+    if (LOCAL_SYNC_MODE) {
+      localState.saveTokens(user_id, {
+        accessToken: access_token,
+        refreshToken: refresh_token,
+      });
+      return res.json({ success: true, mode: 'local' });
+    }
+
     await saveUserTokens(user_id, { accessToken: access_token, refreshToken: refresh_token });
     res.json({ success: true });
   } catch (err) {
@@ -335,19 +531,46 @@ app.post('/save-tokens', async (req, res) => {
   }
 });
 
-// POST /sync-and-cluster - manually trigger data sync + recluster
 app.post('/sync-and-cluster', async (req, res) => {
   const { user_id, access_token, refresh_token } = req.body;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
   try {
+    if (LOCAL_SYNC_MODE) {
+      const existingTokens = localState.getTokens(user_id) || {};
+      const tokens = {
+        accessToken: access_token || existingTokens.accessToken,
+        refreshToken: refresh_token || existingTokens.refreshToken,
+      };
+
+      if (!tokens.accessToken) {
+        return res.status(400).json({ error: 'Access token is required to run local sync' });
+      }
+
+      localState.saveTokens(user_id, tokens);
+      localState.setStatus(user_id, { isProcessing: true });
+
+      const clusters = await buildLocalClusters(tokens.accessToken);
+      localState.setClusters(user_id, clusters);
+      localState.setStatus(user_id, {
+        isProcessing: false,
+        lastSyncAt: new Date().toISOString(),
+        clusterCount: clusters.length,
+      });
+
+      return res.status(202).json({
+        message: 'Local sync and cluster completed.',
+        mode: 'local',
+        clusterCount: clusters.length,
+      });
+    }
+
     if (access_token && refresh_token) {
       await saveUserTokens(user_id, { accessToken: access_token, refreshToken: refresh_token });
     }
     await setProcessing(user_id, true);
 
     const syncArn = process.env.SYNC_LAMBDA_ARN || null;
-
     if (syncArn) {
       await lambdaClient.send(new InvokeCommand({
         FunctionName: syncArn,
@@ -363,12 +586,15 @@ app.post('/sync-and-cluster', async (req, res) => {
   }
 });
 
-// GET /clusters - fetch latest clusters for a user
 app.get('/clusters', async (req, res) => {
   const { user_id } = req.query;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
   try {
+    if (LOCAL_SYNC_MODE) {
+      return res.json({ clusters: localState.getClusters(user_id) || [] });
+    }
+
     const items = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
     res.json({ clusters: items });
   } catch (err) {
@@ -377,12 +603,15 @@ app.get('/clusters', async (req, res) => {
   }
 });
 
-// GET /cluster-status - sync status for the user
 app.get('/cluster-status', async (req, res) => {
   const { user_id } = req.query;
   if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
   try {
+    if (LOCAL_SYNC_MODE) {
+      return res.json(localState.getStatus(user_id));
+    }
+
     const meta = await getItem('UserMeta', { userId: user_id });
     const clusterItems = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
     res.json({
@@ -396,7 +625,6 @@ app.get('/cluster-status', async (req, res) => {
   }
 });
 
-// POST /generate-playlist - natural language playlist generation
 app.post('/generate-playlist', async (req, res) => {
   const { access_token, user_id, request: userRequest } = req.body;
   if (!access_token || !user_id || !userRequest) {
@@ -404,6 +632,36 @@ app.post('/generate-playlist', async (req, res) => {
   }
 
   try {
+    if (LOCAL_SYNC_MODE) {
+      const clusters = localState.getClusters(user_id) || [];
+      if (!clusters.length) {
+        return res.status(400).json({ error: 'No local clusters found. Please sync first.' });
+      }
+
+      const localSelection = await chooseLocalTracksWithOpenAI({
+        accessToken: access_token,
+        userRequest,
+        clusters,
+      });
+
+      const playlistName = `${localSelection.clusterLabel} - ${userRequest}`.slice(0, 100);
+      const playlist = await createSpotifyPlaylist({
+        accessToken: access_token,
+        playlistName,
+        description: localSelection.rationale,
+        trackIds: localSelection.trackIds,
+      });
+
+      return res.json({
+        playlistUrl: playlist.playlistUrl,
+        playlistName,
+        clusterLabel: localSelection.clusterLabel,
+        rationale: localSelection.rationale,
+        trackCount: playlist.trackCount,
+        mode: 'local',
+      });
+    }
+
     const clusters = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
     if (!clusters.length) {
       return res.status(400).json({ error: 'No clusters found. Please sync your listening data first.' });
@@ -438,49 +696,32 @@ app.post('/generate-playlist', async (req, res) => {
     if (!matchedCluster) return res.status(400).json({ error: 'Cluster match failed' });
 
     const trackIds = [...(matchedCluster.trackIds || [])].sort(() => Math.random() - 0.5).slice(0, 30);
-    const trackUris = trackIds.map((id) => `spotify:track:${id}`);
-
-    const profileRes = await axios.get('https://api.spotify.com/v1/me', {
-      headers: { Authorization: `Bearer ${access_token}` },
+    const playlist = await createSpotifyPlaylist({
+      accessToken: access_token,
+      playlistName: matchedCluster.clusterLabel,
+      description: matchedCluster.clusterDescription,
+      trackIds,
     });
-    const spotifyUserId = profileRes.data.id;
-
-    const playlistName = matchedCluster.clusterLabel;
-    const createRes = await axios.post(
-      `https://api.spotify.com/v1/users/${spotifyUserId}/playlists`,
-      { name: playlistName, description: matchedCluster.clusterDescription, public: false },
-      { headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' } }
-    );
-    const playlistId = createRes.data.id;
-    const playlistUrl = createRes.data.external_urls?.spotify;
-
-    if (trackUris.length > 0) {
-      await axios.post(
-        `https://api.spotify.com/v1/playlists/${playlistId}/tracks`,
-        { uris: trackUris },
-        { headers: { Authorization: `Bearer ${access_token}`, 'Content-Type': 'application/json' } }
-      );
-    }
 
     await putItem('GeneratedPlaylists', {
       userId: user_id,
       generatedAt: new Date().toISOString(),
-      playlistId,
-      playlistName,
+      playlistId: playlist.playlistId,
+      playlistName: matchedCluster.clusterLabel,
       userRequest,
       matchedClusterId: clusterId,
       clusterLabel: matchedCluster.clusterLabel,
       gptRationale: rationale || '',
       trackIds,
-      spotifyUrl: playlistUrl,
+      spotifyUrl: playlist.playlistUrl,
     });
 
     res.json({
-      playlistUrl,
-      playlistName,
+      playlistUrl: playlist.playlistUrl,
+      playlistName: matchedCluster.clusterLabel,
       clusterLabel: matchedCluster.clusterLabel,
       rationale,
-      trackCount: trackUris.length,
+      trackCount: playlist.trackCount,
     });
   } catch (err) {
     console.error('generate-playlist error:', err.response?.data || err.message);
@@ -488,10 +729,10 @@ app.post('/generate-playlist', async (req, res) => {
   }
 });
 
-// Health check
 app.get('/', (req, res) => {
   res.json({
     message: 'Spotify Playlist Generator Backend is running!',
+    mode: LOCAL_SYNC_MODE ? 'local' : 'aws',
     endpoints: [
       'GET /login - Start Spotify OAuth',
       'GET /callback - OAuth callback',
@@ -511,6 +752,7 @@ if (!process.env.AWS_EXECUTION_ENV) {
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
     console.log(`Login URL: http://localhost:${PORT}/login`);
+    console.log(`Sync mode: ${LOCAL_SYNC_MODE ? 'local' : 'aws'}`);
   });
 }
 
