@@ -6,7 +6,7 @@
  * writes to DynamoDB ListeningEvents, and triggers song feature extraction.
  */
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-const { putItem, scanItems } = require('../services/dynamodb');
+const { putItem, scanItems, updateItem } = require('../services/dynamodb');
 const { getUserTokens, updateSyncCursor, setProcessing } = require('../services/tokenStore');
 const { annotateChronologicalTracks } = require('../services/playbackHeuristics');
 
@@ -32,12 +32,15 @@ module.exports.handler = async (event) => {
   for (const { userId } of users) {
     try {
       const result = await syncUser(userId, { waitForFeatureExtraction: shouldRunClustering });
+      let clusterResult = null;
       if (shouldRunClustering) {
-        await triggerClustering(userId);
+        clusterResult = await triggerClustering(userId);
       }
+      await persistPipelineStatus(userId, { summary: result, clusterResult, error: null });
       results.push({ userId, ...result });
     } catch (err) {
       console.error(`Error syncing user ${userId}:`, err);
+      await persistPipelineStatus(userId, { summary: null, clusterResult: null, error: err.message });
       results.push({ userId, error: err.message });
     } finally {
       if (shouldRunClustering) {
@@ -116,7 +119,7 @@ async function syncUser(userId, { waitForFeatureExtraction = false } = {}) {
       return acc;
     }, []);
 
-  await triggerFeatureExtraction(uniqueNewTracks, genreMap, { waitForCompletion: waitForFeatureExtraction });
+  const featureExtraction = await triggerFeatureExtraction(uniqueNewTracks, genreMap, { waitForCompletion: waitForFeatureExtraction });
 
   const latestPlayedAt = tracksWithSessions[tracksWithSessions.length - 1].played_at;
   await updateSyncCursor(userId, latestPlayedAt);
@@ -126,6 +129,7 @@ async function syncUser(userId, { waitForFeatureExtraction = false } = {}) {
     mlEligible: tracksWithSessions.filter((item) => item.playbackHeuristics?.includeInMl).length,
     skipped: tracksWithSessions.filter((item) => item.playbackHeuristics?.isSkipped).length,
     spam: tracksWithSessions.filter((item) => item.playbackHeuristics?.isSpam).length,
+    featureExtraction,
   };
 }
 
@@ -247,8 +251,22 @@ async function triggerFeatureExtraction(tracks, genreMap, { waitForCompletion = 
   const mlArn = process.env.ML_LAMBDA_ARN;
   if (!mlArn) {
     console.warn('ML_LAMBDA_ARN not set - skipping feature extraction');
-    return;
+    return {
+      requested: 0,
+      classified: 0,
+      cached: 0,
+      failed: 0,
+      skipped: true,
+    };
   }
+
+  const stats = {
+    requested: tracks.length,
+    classified: 0,
+    cached: 0,
+    failed: 0,
+    skipped: false,
+  };
 
   for (const track of tracks) {
     const artistIds = track.artists.map((artist) => artist.id);
@@ -262,27 +280,61 @@ async function triggerFeatureExtraction(tracks, genreMap, { waitForCompletion = 
     };
 
     try {
-      await lambdaClient.send(new InvokeCommand({
+      const result = await lambdaClient.send(new InvokeCommand({
         FunctionName: mlArn,
         InvocationType: waitForCompletion ? 'RequestResponse' : 'Event',
         Payload: JSON.stringify(payload),
       }));
+
+      if (waitForCompletion && result?.Payload) {
+        const parsed = JSON.parse(Buffer.from(result.Payload).toString());
+        const body = typeof parsed?.body === 'string' ? JSON.parse(parsed.body) : parsed?.body;
+        if (body?.cached) {
+          stats.cached += 1;
+        } else {
+          stats.classified += 1;
+        }
+      }
     } catch (err) {
       console.error(`Failed to invoke ML Lambda for track ${track.id}:`, err.message);
+      stats.failed += 1;
     }
   }
+
+  return stats;
 }
 
 async function triggerClustering(userId) {
   const mlArn = process.env.ML_LAMBDA_ARN;
   if (!mlArn) {
     console.warn('ML_LAMBDA_ARN not set - skipping clustering');
-    return;
+    return { skipped: true };
   }
 
-  await lambdaClient.send(new InvokeCommand({
+  const result = await lambdaClient.send(new InvokeCommand({
     FunctionName: mlArn,
     InvocationType: 'RequestResponse',
     Payload: JSON.stringify({ action: 'run_clustering', userId }),
   }));
+
+  if (!result?.Payload) {
+    return { status: 'unknown' };
+  }
+
+  const parsed = JSON.parse(Buffer.from(result.Payload).toString());
+  return typeof parsed?.body === 'string' ? JSON.parse(parsed.body) : (parsed?.body || parsed);
+}
+
+async function persistPipelineStatus(userId, { summary, clusterResult, error }) {
+  await updateItem(
+    'UserMeta',
+    { userId },
+    'SET lastSyncSummary = :summary, lastClusterResult = :clusterResult, lastSyncError = :error, lastPipelineUpdatedAt = :updatedAt',
+    {
+      ':summary': summary,
+      ':clusterResult': clusterResult,
+      ':error': error,
+      ':updatedAt': new Date().toISOString(),
+    }
+  );
 }

@@ -361,6 +361,10 @@ function Dashboard() {
 
   const clusterSpotlight = clusters.slice(0, 3);
   const anyPanelOpen = showSidebar || showAnalytics || showClusters;
+  const lastSyncSummary = syncStatus?.lastSyncSummary;
+  const featureSummary = lastSyncSummary?.featureExtraction;
+  const clusterSummary = syncStatus?.lastClusterResult;
+  const lastSyncError = syncStatus?.lastSyncError;
 
   return (
     <div className="dashboard-shell">
@@ -508,6 +512,20 @@ function Dashboard() {
                 <span className="dash-pill">Skip threshold: 25%</span>
                 <span className="dash-pill">Rapid replay guarded</span>
                 <span className="dash-pill">Last sync: {syncStatus?.lastSyncAt ? "Recorded" : "Not yet"}</span>
+                {Number.isFinite(lastSyncSummary?.synced) && (
+                  <span className="dash-pill">Events saved: {lastSyncSummary.synced}</span>
+                )}
+                {Number.isFinite(featureSummary?.requested) && (
+                  <span className="dash-pill">
+                    Classified: {featureSummary.classified} new, {featureSummary.cached} cached, {featureSummary.failed} failed
+                  </span>
+                )}
+                {Number.isFinite(clusterSummary?.clustersCreated) && (
+                  <span className="dash-pill">Clusters created: {clusterSummary.clustersCreated}</span>
+                )}
+                {lastSyncError && (
+                  <span className="dash-pill">Sync error: {lastSyncError}</span>
+                )}
               </div>
             </div>
 

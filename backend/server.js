@@ -81,6 +81,27 @@ function getTimeOfDay(date) {
   return 'night';
 }
 
+function getLatestClusters(clusters = []) {
+  if (!clusters.length) return [];
+
+  const withVersion = clusters.filter((cluster) => Number.isFinite(Number(cluster.clusteringVersion)));
+  if (withVersion.length) {
+    const latestVersion = Math.max(...withVersion.map((cluster) => Number(cluster.clusteringVersion)));
+    return withVersion.filter((cluster) => Number(cluster.clusteringVersion) === latestVersion);
+  }
+
+  const withCreatedAt = clusters.filter((cluster) => cluster.createdAt);
+  if (withCreatedAt.length) {
+    const latestCreatedAt = withCreatedAt
+      .map((cluster) => cluster.createdAt)
+      .sort()
+      .pop();
+    return withCreatedAt.filter((cluster) => cluster.createdAt === latestCreatedAt);
+  }
+
+  return clusters;
+}
+
 async function fetchSpotifyProfile(accessToken) {
   const response = await axios.get('https://api.spotify.com/v1/me', {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -596,7 +617,8 @@ app.get('/clusters', async (req, res) => {
     }
 
     const items = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
-    res.json({ clusters: items });
+    const latestClusters = getLatestClusters(items);
+    res.json({ clusters: latestClusters });
   } catch (err) {
     console.error('clusters error:', err);
     res.status(500).json({ error: 'Failed to fetch clusters' });
@@ -614,10 +636,15 @@ app.get('/cluster-status', async (req, res) => {
 
     const meta = await getItem('UserMeta', { userId: user_id });
     const clusterItems = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
+    const latestClusters = getLatestClusters(clusterItems);
     res.json({
       lastSyncAt: meta?.lastSyncAt || null,
-      clusterCount: clusterItems.length,
+      clusterCount: latestClusters.length,
       isProcessing: meta?.isProcessing || false,
+      lastSyncSummary: meta?.lastSyncSummary || null,
+      lastClusterResult: meta?.lastClusterResult || null,
+      lastSyncError: meta?.lastSyncError || null,
+      lastPipelineUpdatedAt: meta?.lastPipelineUpdatedAt || null,
     });
   } catch (err) {
     console.error('cluster-status error:', err);
@@ -662,7 +689,9 @@ app.post('/generate-playlist', async (req, res) => {
       });
     }
 
-    const clusters = await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id });
+    const clusters = getLatestClusters(
+      await queryItems('UserClusters', 'userId = :uid', { ':uid': user_id })
+    );
     if (!clusters.length) {
       return res.status(400).json({ error: 'No clusters found. Please sync your listening data first.' });
     }
