@@ -19,6 +19,10 @@ dynamodb = boto3.resource('dynamodb', region_name=os.environ.get('DYNAMODB_REGIO
 OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
 
 CLASSIFICATION_VERSION = 1
+RECENCY_HALFLIFE_DAYS = 60
+MIN_NEW_ML_EVENTS_FOR_RECLUSTER = 25
+MIN_ML_GROWTH_RATIO_FOR_RECLUSTER = 0.15
+MIN_RECLUSTER_INTERVAL_HOURS = 24
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -106,23 +110,30 @@ def run_clustering(event):
         user_ids = [item['userId'] for item in scan_result.get('Items', [])]
 
     total_clusters = 0
+    results = []
     for uid in user_ids:
         try:
-            n = _cluster_user(uid)
-            total_clusters += n
-            print(f"Clustered user {uid}: {n} clusters")
+            user_result = _cluster_user(uid)
+            total_clusters += user_result.get('clustersCreated', 0)
+            results.append({'userId': uid, **user_result})
+            print(f"Clustered user {uid}: {user_result.get('clustersCreated', 0)} clusters")
         except Exception as e:
             print(f"Error clustering user {uid}: {e}")
+            results.append({'userId': uid, 'clustersCreated': 0, 'skipped': False, 'error': str(e)})
 
-    return _ok({'usersProcessed': len(user_ids), 'clustersCreated': total_clusters})
+    return _ok({
+        'usersProcessed': len(user_ids),
+        'clustersCreated': total_clusters,
+        'results': results,
+    })
 
 
 def _cluster_user(user_id):
-    import numpy as np
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     # Fetch all listening events for this user
     events_table = dynamodb.Table('ListeningEvents')
+    meta_table = dynamodb.Table('UserMeta')
     events = []
     kwargs = {
         'KeyConditionExpression': boto3.dynamodb.conditions.Key('userId').eq(user_id),
@@ -137,7 +148,29 @@ def _cluster_user(user_id):
 
     if len(events) < 10:
         print(f"Not enough events for user {user_id} ({len(events)})")
-        return 0
+        return {
+            'clustersCreated': 0,
+            'skipped': True,
+            'reason': 'not_enough_events',
+            'eventsFound': len(events),
+            'mlEligibleEvents': 0,
+        }
+
+    ml_eligible_count = sum(1 for event in events if event.get('includeInMl', True))
+    user_meta = meta_table.get_item(Key={'userId': user_id}).get('Item') or {}
+    should_skip, skip_reason, skip_meta = _should_skip_reclustering(user_meta, ml_eligible_count)
+    if should_skip:
+        print(f"Skipping clustering for {user_id}: {skip_reason}")
+        summary = {
+            'clustersCreated': 0,
+            'skipped': True,
+            'reason': skip_reason,
+            'eventsFound': len(events),
+            'mlEligibleEvents': ml_eligible_count,
+            **skip_meta,
+        }
+        _persist_clustering_summary(meta_table, user_id, summary)
+        return summary
 
     # Batch-get song features for all unique track IDs
     track_ids = list({e['trackId'] for e in events})
@@ -156,15 +189,28 @@ def _cluster_user(user_id):
             }
 
     # Build feature matrix
-    X, meta = feature_builder.build_feature_matrix(events, song_features_map)
+    X, meta, sample_weights = feature_builder.build_feature_matrix(
+        events,
+        song_features_map,
+        half_life_days=RECENCY_HALFLIFE_DAYS,
+    )
     if len(X) < 10:
         print(f"Not enough classified tracks for user {user_id}")
-        return 0
+        summary = {
+            'clustersCreated': 0,
+            'skipped': True,
+            'reason': 'not_enough_classified_tracks',
+            'eventsFound': len(events),
+            'mlEligibleEvents': ml_eligible_count,
+            'classifiedEvents': int(len(X)),
+        }
+        _persist_clustering_summary(meta_table, user_id, summary)
+        return summary
 
     # Scale + cluster
     X_scaled, scaler = clust.scale_features(X)
-    k = clust.choose_k(X_scaled)
-    km, labels = clust.run_kmeans(X_scaled, k)
+    k = clust.choose_k(X_scaled, sample_weights=sample_weights)
+    km, labels = clust.run_kmeans(X_scaled, k, sample_weights=sample_weights)
 
     # Write clusters to DynamoDB
     now = datetime.utcnow().isoformat() + 'Z'
@@ -207,7 +253,76 @@ def _cluster_user(user_id):
         }
         clusters_table.put_item(Item=item)
 
-    return k
+    summary = {
+        'clustersCreated': int(k),
+        'skipped': False,
+        'reason': None,
+        'eventsFound': len(events),
+        'mlEligibleEvents': ml_eligible_count,
+        'classifiedEvents': int(len(X)),
+        'clusteringVersion': version,
+    }
+    _persist_clustering_summary(meta_table, user_id, summary)
+    return summary
+
+
+def _should_skip_reclustering(user_meta, current_ml_eligible_count):
+    from datetime import datetime, timezone
+
+    prev_count = int(user_meta.get('lastClusteredMlEligibleCount') or 0)
+    prev_at_raw = user_meta.get('lastClusteringAt')
+    if prev_count <= 0 or not prev_at_raw:
+        return False, None, {}
+
+    try:
+        prev_at = datetime.fromisoformat(str(prev_at_raw).replace('Z', '+00:00'))
+        if prev_at.tzinfo is None:
+            prev_at = prev_at.replace(tzinfo=timezone.utc)
+    except Exception:
+        return False, None, {}
+
+    now = datetime.now(timezone.utc)
+    hours_since = max(0.0, (now - prev_at).total_seconds() / 3600.0)
+    new_events = max(0, int(current_ml_eligible_count) - prev_count)
+    growth_ratio = (new_events / prev_count) if prev_count > 0 else 1.0
+
+    if hours_since < MIN_RECLUSTER_INTERVAL_HOURS:
+        return True, 'min_interval_not_met', {
+            'newMlEligibleEvents': new_events,
+            'growthRatio': round(growth_ratio, 4),
+            'hoursSinceLastClustering': round(hours_since, 2),
+        }
+
+    if new_events < MIN_NEW_ML_EVENTS_FOR_RECLUSTER or growth_ratio < MIN_ML_GROWTH_RATIO_FOR_RECLUSTER:
+        return True, 'insufficient_new_data', {
+            'newMlEligibleEvents': new_events,
+            'growthRatio': round(growth_ratio, 4),
+            'hoursSinceLastClustering': round(hours_since, 2),
+        }
+
+    return False, None, {
+        'newMlEligibleEvents': new_events,
+        'growthRatio': round(growth_ratio, 4),
+        'hoursSinceLastClustering': round(hours_since, 2),
+    }
+
+
+def _persist_clustering_summary(meta_table, user_id, summary):
+    meta_table.update_item(
+        Key={'userId': user_id},
+        UpdateExpression=(
+            'SET lastClusteringAt = :now, '
+            'lastClusteredMlEligibleCount = :mlCount, '
+            'lastClusteringVersion = :version, '
+            'lastClusteringSummary = :summary'
+        ),
+        ExpressionAttributeValues={
+            ':now': _now(),
+            ':mlCount': int(summary.get('mlEligibleEvents') or 0),
+            ':version': int(summary.get('clusteringVersion') or 0),
+            ':summary': summary,
+        },
+    )
 
 
 def _gpt_label_cluster(sample_tracks, stats):

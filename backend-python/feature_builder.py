@@ -3,8 +3,10 @@ feature_builder.py
 Constructs normalized feature vectors from listening events + song features
 for K-means clustering. Incorporates co-occurrence context blending.
 """
+import math
 import numpy as np
 from collections import defaultdict
+from datetime import datetime, timezone
 
 # Feature vector column indices
 IDX_ENERGY = 0
@@ -37,9 +39,10 @@ TIME_OF_DAY_COLS = {
 }
 
 CO_OCCURRENCE_WEIGHT = 0.20  # 20% context blend, 80% base features
+RECENCY_HALFLIFE_DAYS = 60
 
 
-def build_feature_matrix(listening_events, song_features_map):
+def build_feature_matrix(listening_events, song_features_map, half_life_days=RECENCY_HALFLIFE_DAYS):
     """
     Build a feature matrix and metadata list from listening events.
 
@@ -49,10 +52,12 @@ def build_feature_matrix(listening_events, song_features_map):
 
     Returns:
         (feature_matrix np.ndarray shape [N, FEATURE_DIM],
-         event_metadata list of dicts with userId, trackId, sessionId, playedAt)
+         event_metadata list of dicts with userId, trackId, sessionId, playedAt,
+         sample_weights np.ndarray shape [N])
     """
     rows = []
     meta = []
+    now = datetime.now(timezone.utc)
 
     for event in listening_events:
         if not event.get('includeInMl', True):
@@ -63,6 +68,7 @@ def build_feature_matrix(listening_events, song_features_map):
             continue  # skip tracks not yet classified
 
         vec = _build_base_vector(event, features)
+        recency_weight = _compute_recency_weight(event.get('playedAt'), now, half_life_days)
         rows.append(vec)
         meta.append({
             'trackId': track_id,
@@ -74,14 +80,29 @@ def build_feature_matrix(listening_events, song_features_map):
             'playedAt': event.get('playedAt', ''),
             'timeOfDay': event.get('timeOfDay', ''),
             'weatherCondition': event.get('weatherCondition', 'Unknown'),
+            'recencyWeight': recency_weight,
         })
 
     if not rows:
-        return np.empty((0, FEATURE_DIM)), []
+        return np.empty((0, FEATURE_DIM)), [], np.empty((0,), dtype=np.float32)
 
     base_matrix = np.array(rows, dtype=np.float32)
+    sample_weights = np.array([m.get('recencyWeight', 1.0) for m in meta], dtype=np.float32)
     blended = _blend_cooccurrence(base_matrix, meta)
-    return blended, meta
+    return blended, meta, sample_weights
+
+
+def _compute_recency_weight(played_at, reference_time, half_life_days):
+    """Exponential decay where weight halves every configured half-life window."""
+    try:
+        played_dt = datetime.fromisoformat((played_at or '').replace('Z', '+00:00'))
+        if played_dt.tzinfo is None:
+            played_dt = played_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return 1.0
+
+    age_days = max(0.0, (reference_time - played_dt).total_seconds() / 86400.0)
+    return float(math.exp(-math.log(2) * (age_days / max(1.0, float(half_life_days)))))
 
 
 def _build_base_vector(event, features):
