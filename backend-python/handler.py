@@ -9,14 +9,14 @@ Dispatches to one of three actions:
 import json
 import os
 import boto3
+import urllib.request
 from decimal import Decimal
-from openai import OpenAI
 import prompts
 import feature_builder
 import clustering as clust
 
 dynamodb = boto3.resource('dynamodb', region_name=os.environ.get('DYNAMODB_REGION', 'us-east-1'))
-openai_client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
 
 CLASSIFICATION_VERSION = 1
 
@@ -29,6 +29,8 @@ def handler(event, context):
             return extract_features(event)
         elif action == 'run_clustering':
             return run_clustering(event)
+        elif action == 'backfill_features':
+            return backfill_features(event)
         elif action == 'match_cluster':
             return match_cluster(event)
         else:
@@ -60,17 +62,12 @@ def extract_features(event):
         genres=genres_str,
     )
 
-    response = openai_client.chat.completions.create(
+    raw = _openai_json_completion(
         model='gpt-4o',
         temperature=0,
-        response_format={'type': 'json_object'},
-        messages=[
-            {'role': 'system', 'content': prompts.SONG_CLASSIFICATION_SYSTEM},
-            {'role': 'user', 'content': prompt},
-        ],
+        system_prompt=prompts.SONG_CLASSIFICATION_SYSTEM,
+        user_prompt=prompt,
     )
-
-    raw = response.choices[0].message.content
     features = json.loads(raw)
     _validate_features(features)
 
@@ -182,8 +179,12 @@ def _cluster_user(user_id):
         stats = feature_builder.get_cluster_stats(indices, meta, song_features_map)
         sample_tracks = feature_builder.get_sample_tracks_for_label(indices, meta)
 
-        # GPT label
-        label_data = _gpt_label_cluster(sample_tracks, stats)
+        # GPT labeling is best-effort. If it fails, still persist the cluster.
+        try:
+            label_data = _gpt_label_cluster(sample_tracks, stats)
+        except Exception as ex:
+            print(f"Cluster label fallback for user {user_id}, cluster {cluster_idx}: {ex}")
+            label_data = _fallback_cluster_label(cluster_idx, stats)
         cluster_id = f"cluster_{cluster_idx}_{version}"
 
         centroid = km.cluster_centers_[cluster_idx].tolist()
@@ -219,16 +220,87 @@ def _gpt_label_cluster(sample_tracks, stats):
         dominant_time=stats['dominantTimeOfDay'],
         dominant_weather=stats['dominantWeather'],
     )
-    response = openai_client.chat.completions.create(
+    raw = _openai_json_completion(
         model='gpt-4o',
         temperature=0.3,
-        response_format={'type': 'json_object'},
-        messages=[
-            {'role': 'system', 'content': prompts.CLUSTER_LABEL_SYSTEM},
-            {'role': 'user', 'content': prompt},
-        ],
+        system_prompt=prompts.CLUSTER_LABEL_SYSTEM,
+        user_prompt=prompt,
     )
-    return json.loads(response.choices[0].message.content)
+    return json.loads(raw)
+
+
+def _fallback_cluster_label(cluster_idx, stats):
+    tone = 'balanced'
+    if stats['avgEnergy'] >= 0.67:
+        tone = 'high-energy'
+    elif stats['avgEnergy'] <= 0.33:
+        tone = 'low-energy'
+
+    mood = 'uplifting' if stats['avgValence'] >= 0.5 else 'moody'
+    time_of_day = stats.get('dominantTimeOfDay', 'mixed')
+
+    return {
+        'label': f"{time_of_day.title()} {tone} {mood}".strip(),
+        'description': (
+            f"Auto-labeled fallback cluster for mostly {time_of_day} listening with "
+            f"{tone} and {mood} characteristics."
+        ),
+    }
+
+
+# ── Action: backfill_features ─────────────────────────────────────────────────
+def backfill_features(event):
+    """Classify all unclassified tracks already in ListeningEvents for a user."""
+    user_id = event.get('userId')
+    if not user_id:
+        return _error(400, 'userId is required')
+
+    events_table = dynamodb.Table('ListeningEvents')
+    features_table = dynamodb.Table('SongFeatures')
+
+    # Fetch all listening events for this user
+    events = []
+    kwargs = {'KeyConditionExpression': boto3.dynamodb.conditions.Key('userId').eq(user_id)}
+    while True:
+        result = events_table.query(**kwargs)
+        events.extend(result.get('Items', []))
+        last = result.get('LastEvaluatedKey')
+        if not last:
+            break
+        kwargs['ExclusiveStartKey'] = last
+
+    # Collect unique unclassified tracks
+    seen = set()
+    to_classify = []
+    for e in events:
+        tid = e.get('trackId')
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        existing = features_table.get_item(Key={'trackId': tid}).get('Item')
+        if existing and existing.get('classificationVersion') == CLASSIFICATION_VERSION:
+            continue
+        to_classify.append(e)
+
+    print(f"Backfill: {len(events)} events, {len(to_classify)} tracks need classification")
+
+    classified = 0
+    failed = 0
+    for e in to_classify:
+        try:
+            extract_features({
+                'trackId': e['trackId'],
+                'trackName': e.get('trackName', ''),
+                'artistNames': e.get('artistNames', ''),
+                'artistGenres': e.get('artistGenres', []),
+            })
+            classified += 1
+            print(f"Classified {e.get('trackName')} ({e['trackId']})")
+        except Exception as ex:
+            print(f"Failed to classify {e['trackId']}: {ex}")
+            failed += 1
+
+    return _ok({'eventsFound': len(events), 'classified': classified, 'failed': failed})
 
 
 # ── Action: match_cluster ──────────────────────────────────────────────────────
@@ -249,17 +321,13 @@ def match_cluster(event):
         cluster_list=cluster_list,
     )
 
-    response = openai_client.chat.completions.create(
+    raw = _openai_json_completion(
         model='gpt-4o',
         temperature=0.2,
-        response_format={'type': 'json_object'},
-        messages=[
-            {'role': 'system', 'content': prompts.PLAYLIST_MATCH_SYSTEM},
-            {'role': 'user', 'content': prompt},
-        ],
+        system_prompt=prompts.PLAYLIST_MATCH_SYSTEM,
+        user_prompt=prompt,
     )
-
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(raw)
     return _ok(result)
 
 
@@ -276,6 +344,33 @@ def _validate_features(f):
 
 def _to_decimal(value):
     return Decimal(str(round(float(value), 4)))
+
+
+def _openai_json_completion(model, temperature, system_prompt, user_prompt):
+    payload = json.dumps({
+        'model': model,
+        'temperature': temperature,
+        'response_format': {'type': 'json_object'},
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt},
+        ],
+    }).encode('utf-8')
+
+    request = urllib.request.Request(
+        'https://api.openai.com/v1/chat/completions',
+        data=payload,
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+        },
+        method='POST',
+    )
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        body = json.loads(response.read().decode('utf-8'))
+
+    return body['choices'][0]['message']['content']
 
 
 def _now():

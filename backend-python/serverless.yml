@@ -2,8 +2,13 @@ service: spotify-ml-pipeline
 
 useDotenv: true
 
-plugins:
-  - serverless-dotenv-plugin
+package:
+  patterns:
+    - '!python/**'
+    - '!layers/**'
+    - '!.serverless/**'
+    - '!**/__pycache__/**'
+    - '!**/*.pyc'
 
 provider:
   name: aws
