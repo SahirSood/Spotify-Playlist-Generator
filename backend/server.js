@@ -22,6 +22,7 @@ const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 const REDIRECT_URI = process.env.SPOTIFY_REDIRECT_URI || 'http://localhost:5000/callback';
 const LOCAL_SYNC_MODE = !process.env.SYNC_LAMBDA_ARN || !process.env.ML_LAMBDA_ARN;
+const FAMILIARITY_HALFLIFE_DAYS = 60;
 
 function parseCookies(cookieHeader = '') {
   return cookieHeader
@@ -100,6 +101,48 @@ function getLatestClusters(clusters = []) {
   }
 
   return clusters;
+}
+
+function computeRecencyWeight(playedAt) {
+  const playedMs = new Date(playedAt).getTime();
+  if (!Number.isFinite(playedMs)) return 1;
+  const ageDays = Math.max(0, (Date.now() - playedMs) / (1000 * 60 * 60 * 24));
+  return Math.exp(-Math.log(2) * (ageDays / FAMILIARITY_HALFLIFE_DAYS));
+}
+
+function shuffleArray(items) {
+  const clone = [...items];
+  for (let i = clone.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [clone[i], clone[j]] = [clone[j], clone[i]];
+  }
+  return clone;
+}
+
+async function rankTracksByFamiliarity(userId, candidateTrackIds, limit = 30) {
+  if (!candidateTrackIds?.length) return [];
+
+  const trackSet = new Set(candidateTrackIds);
+  const scores = new Map(candidateTrackIds.map((trackId) => [trackId, 0]));
+  const events = await queryItems('ListeningEvents', 'userId = :uid', { ':uid': userId });
+
+  for (const event of events) {
+    const trackId = event.trackId;
+    if (!trackSet.has(trackId)) continue;
+
+    const qualityPenalty = event.isSkipped || event.isSpam ? 0.25 : 1;
+    const recency = computeRecencyWeight(event.playedAt);
+    const increment = qualityPenalty * recency;
+    scores.set(trackId, (scores.get(trackId) || 0) + increment);
+  }
+
+  const ranked = [...scores.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([trackId]) => trackId);
+
+  const scored = new Set(ranked);
+  const unseen = shuffleArray(candidateTrackIds.filter((trackId) => !scored.has(trackId)));
+  return [...ranked, ...unseen].slice(0, limit);
 }
 
 async function fetchSpotifyProfile(accessToken) {
@@ -724,7 +767,7 @@ app.post('/generate-playlist', async (req, res) => {
     const matchedCluster = clusters.find((cluster) => cluster.clusterId === clusterId);
     if (!matchedCluster) return res.status(400).json({ error: 'Cluster match failed' });
 
-    const trackIds = [...(matchedCluster.trackIds || [])].sort(() => Math.random() - 0.5).slice(0, 30);
+    const trackIds = await rankTracksByFamiliarity(user_id, matchedCluster.trackIds || [], 30);
     const playlist = await createSpotifyPlaylist({
       accessToken: access_token,
       playlistName: matchedCluster.clusterLabel,
