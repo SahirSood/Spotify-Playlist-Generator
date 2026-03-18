@@ -36,3 +36,15 @@ yarn-error.log*
 .claude/
 .codex/
 **/__pycache__/
+
+# local debug payloads/responses
+key.json
+key-ml.json
+payload.json
+response.json
+backend-python/payload.json
+backend-python/response.json
+backend-python/cluster-response.json
+
+# generated local lambda artifacts
+backend-python/layers/
